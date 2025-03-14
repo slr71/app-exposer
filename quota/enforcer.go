@@ -10,7 +10,7 @@ import (
 	"github.com/cyverse-de/app-exposer/common"
 	"github.com/cyverse-de/go-mod/gotelnats"
 	"github.com/cyverse-de/go-mod/pbinit"
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	"github.com/cyverse-de/p/go/qms"
 	"github.com/jmoiron/sqlx"
 	"github.com/nats-io/nats.go"

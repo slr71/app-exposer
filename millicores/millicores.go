@@ -6,7 +6,7 @@ import (
 	"github.com/cockroachdb/apd"
 	"github.com/cyverse-de/app-exposer/common"
 	"github.com/cyverse-de/app-exposer/db"
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	"github.com/sirupsen/logrus"
 )
 

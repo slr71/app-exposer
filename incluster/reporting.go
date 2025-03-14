@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,10 +26,7 @@ func getListSelector(customLabels map[string]string) labels.Selector {
 	allLabels := map[string]string{
 		"app-type": "interactive",
 	}
-
-	for k, v := range customLabels {
-		allLabels[k] = v
-	}
+	maps.Copy(allLabels, customLabels)
 
 	set := labels.Set(allLabels)
 

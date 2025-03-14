@@ -12,7 +12,7 @@ import (
 	v1alpha1 "github.com/argoproj/argo-workflows/v3/pkg/apis/workflow/v1alpha1"
 	"github.com/cyverse-de/app-exposer/imageinfo"
 	"github.com/cyverse-de/app-exposer/resourcing"
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	"github.com/gosimple/slug"
 	apiv1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/apimachinery/pkg/api/resource"

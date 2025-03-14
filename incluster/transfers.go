@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 
@@ -198,6 +198,35 @@ func isFinished(status string) bool {
 	}
 }
 
+// deploymentUsesCSIDriver determines whether or not a deployment uses the iRODS CSI Driver. Each new deployment will
+// have a label associated with it that indicates whether or not it's using the CSI driver. Some old pods without the
+// label may still be running, though. If a pod without the label is encountered then this function falls back to the
+// UseCSIDriver configuration setting.
+func (i *Incluster) deploymentUsesCSIDriver(ctx context.Context, externalID string) (bool, error) {
+	var usesCSIDriver bool
+
+	// Look up the deployment.
+	customLabels := map[string]string{"external-id": externalID}
+	deploymentList, err := i.deploymentList(ctx, i.ViceNamespace, customLabels, []string{})
+	if err != nil {
+		return usesCSIDriver, errors.Wrap(err, "unable to determine if the deployment uses the iRODS CSI driver")
+	}
+	if deploymentList == nil || len(deploymentList.Items) == 0 {
+		return usesCSIDriver, fmt.Errorf("no deployment found for external id: %s", externalID)
+	}
+	deployment := deploymentList.Items[0]
+
+	// Determine whether the deployment uses the CSI driver.
+	labelValue := deployment.Labels["use-csi-driver"]
+	if labelValue == "" {
+		usesCSIDriver = i.UseCSIDriver
+	} else {
+		usesCSIDriver = labelValue == "true"
+	}
+
+	return usesCSIDriver, nil
+}
+
 // doFileTransfer handles requests to initial file transfers for a VICE
 // analysis. We only need the ID of the job, nothing is required in the
 // body of the request.
@@ -205,7 +234,13 @@ func (i *Incluster) doFileTransfer(ctx context.Context, externalID, reqpath, kin
 	ctx, span := otel.Tracer(otelName).Start(ctx, "doFileTransfer")
 	defer span.End()
 
-	if i.UseCSIDriver {
+	// Determine if the deployment uses the CSI driver.
+	usesCSIDriver, err := i.deploymentUsesCSIDriver(ctx, externalID)
+	if err != nil {
+		return err
+	}
+
+	if usesCSIDriver {
 		// if we use CSI Driver, file transfer is not required.
 		msg := fmt.Sprintf("%s succeeded for job %s", kind, externalID)
 
