@@ -1,7 +1,7 @@
 ### First stage
 FROM quay.io/goswagger/swagger AS swagger
 FROM harbor.cyverse.org/de/just:latest AS just
-FROM golang:1.23 AS build-root
+FROM golang:1.24 AS build-root
 
 COPY --from=just /usr/local/cargo/bin/just /usr/bin/
 
