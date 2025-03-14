@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/cyverse-de/app-exposer/common"
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	apiv1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/apimachinery/pkg/api/resource"
 )

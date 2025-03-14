@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/cyverse-de/app-exposer/resourcing"
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,7 +54,7 @@ func (i *Incluster) deploymentVolumes(job *model.Job) []apiv1.Volume {
 		})
 	}
 
-	if i.UseCSIDriver {
+	if i.UseCSIDriver && job.MountDataStore {
 		output = append(output,
 			apiv1.Volume{
 				Name: workingDirVolumeName,
@@ -258,7 +258,7 @@ func workingDirMountPath(job *model.Job) string {
 func (i *Incluster) initContainers(job *model.Job) []apiv1.Container {
 	output := []apiv1.Container{}
 
-	if !i.UseCSIDriver {
+	if !i.UseCSIDriver && job.MountDataStore {
 		output = append(output, i.inputStagingContainer(job))
 	} else {
 		output = append(output, i.workingDirPrepContainer(job))
@@ -296,7 +296,7 @@ func (i *Incluster) defineAnalysisContainer(job *model.Job) apiv1.Container {
 	)
 
 	volumeMounts := []apiv1.VolumeMount{}
-	if i.UseCSIDriver {
+	if i.UseCSIDriver && job.MountDataStore {
 		volumeMounts = append(volumeMounts, apiv1.VolumeMount{
 			Name:      workingDirVolumeName,
 			MountPath: workingDirMountPath(job),
@@ -432,7 +432,7 @@ func (i *Incluster) deploymentContainers(job *model.Job) []apiv1.Container {
 		},
 	})
 
-	if !i.UseCSIDriver {
+	if !i.UseCSIDriver && job.MountDataStore {
 		output = append(output, apiv1.Container{
 			Name:            fileTransfersContainerName,
 			Image:           fmt.Sprintf("%s:%s", i.PorklockImage, i.PorklockTag),

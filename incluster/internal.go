@@ -22,7 +22,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -107,15 +107,16 @@ func (i *Incluster) labelsFromJob(ctx context.Context, job *model.Job) (map[stri
 	}
 
 	return map[string]string{
-		"external-id":   job.InvocationID,
-		"app-name":      common.LabelValueString(job.AppName),
-		"app-id":        job.AppID,
-		"username":      common.LabelValueString(job.Submitter),
-		"user-id":       job.UserID,
-		"analysis-name": common.LabelValueString(string(name[:stringmax])),
-		"app-type":      "interactive",
-		"subdomain":     IngressName(job.UserID, job.InvocationID),
-		"login-ip":      ipAddr,
+		"external-id":    job.InvocationID,
+		"app-name":       common.LabelValueString(job.AppName),
+		"app-id":         job.AppID,
+		"username":       common.LabelValueString(job.Submitter),
+		"user-id":        job.UserID,
+		"analysis-name":  common.LabelValueString(string(name[:stringmax])),
+		"app-type":       "interactive",
+		"subdomain":      IngressName(job.UserID, job.InvocationID),
+		"login-ip":       ipAddr,
+		"use-csi-driver": fmt.Sprintf("%t", i.UseCSIDriver && job.MountDataStore),
 	}, nil
 }
 

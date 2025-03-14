@@ -10,7 +10,7 @@ import (
 
 	"github.com/cyverse-de/app-exposer/batch"
 	"github.com/cyverse-de/app-exposer/imageinfo"
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/kubernetes"

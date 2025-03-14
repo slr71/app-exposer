@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	apiv1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -141,7 +141,7 @@ func (i *Incluster) getCSIDataVolumeLabels(ctx context.Context, job *model.Job) 
 // getPersistentVolumes returns the PersistentVolumes for the VICE analysis. It does
 // not call the k8s API.
 func (i *Incluster) getPersistentVolumes(ctx context.Context, job *model.Job) ([]*apiv1.PersistentVolume, error) {
-	if i.UseCSIDriver {
+	if i.UseCSIDriver && job.MountDataStore {
 		dataPathMappings := []IRODSFSPathMapping{}
 
 		// input output path
@@ -221,7 +221,7 @@ func (i *Incluster) getPersistentVolumes(ctx context.Context, job *model.Job) ([
 // getPersistentVolumeClaims returns the PersistentVolumes for the VICE analysis. It does
 // not call the k8s API.
 func (i *Incluster) getPersistentVolumeClaims(ctx context.Context, job *model.Job) ([]*apiv1.PersistentVolumeClaim, error) {
-	if i.UseCSIDriver {
+	if i.UseCSIDriver && job.MountDataStore {
 		labels, err := i.labelsFromJob(ctx, job)
 		if err != nil {
 			return nil, err
@@ -259,7 +259,7 @@ func (i *Incluster) getPersistentVolumeClaims(ctx context.Context, job *model.Jo
 // getPersistentVolumeSources returns the volumes for the VICE analysis. It does
 // not call the k8s API.
 func (i *Incluster) getPersistentVolumeSources(job *model.Job) ([]*apiv1.Volume, error) {
-	if i.UseCSIDriver {
+	if i.UseCSIDriver && job.MountDataStore {
 		volumes := []*apiv1.Volume{}
 
 		dataVolume := &apiv1.Volume{
@@ -281,7 +281,7 @@ func (i *Incluster) getPersistentVolumeSources(job *model.Job) ([]*apiv1.Volume,
 // getPersistentVolumeMounts returns the volume mount for the VICE analysis. It does
 // not call the k8s API.
 func (i *Incluster) getPersistentVolumeMounts(job *model.Job) []*apiv1.VolumeMount {
-	if i.UseCSIDriver {
+	if i.UseCSIDriver && job.MountDataStore {
 		volumeMounts := []*apiv1.VolumeMount{}
 
 		dataVolumeMount := &apiv1.VolumeMount{

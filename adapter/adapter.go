@@ -13,7 +13,7 @@ import (
 	"github.com/cyverse-de/app-exposer/millicores"
 	"github.com/cyverse-de/app-exposer/quota"
 	"github.com/cyverse-de/app-exposer/types"
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	"github.com/labstack/echo/v4"
 	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"

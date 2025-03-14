@@ -3,7 +3,7 @@ package incluster
 import (
 	"context"
 
-	"github.com/cyverse-de/model/v7"
+	"github.com/cyverse-de/model/v8"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
