@@ -1,5 +1,5 @@
 ### First stage
-FROM quay.io/goswagger/swagger AS swagger
+FROM quay.io/goswagger/swagger:sha-1818af2 AS swagger
 FROM harbor.cyverse.org/de/just:latest AS just
 FROM golang:1.24 AS build-root
 
