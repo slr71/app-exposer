@@ -135,7 +135,7 @@ func (a *Apps) GetUserIP(ctx context.Context, userID string) (string, error) {
 	)
 
 	err := a.DB.QueryRowContext(ctx, getUserIPQuery, userID).Scan(&ipAddr)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return "", err
 	}
 
