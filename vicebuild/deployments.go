@@ -3,6 +3,7 @@ package vicebuild
 import (
 	"fmt"
 	"net/url"
+	"path/filepath"
 
 	"github.com/cyverse-de/app-exposer/common"
 	"github.com/cyverse-de/app-exposer/constants"
@@ -145,8 +146,8 @@ func (c *Config) analysisContainer(spec *operatorclient.VICESpec) apiv1.Containe
 }
 
 // viceProxyContainer builds the vice-proxy sidecar with per-analysis args, the
-// cluster-config-secret envFrom, and the permissions mount — folding in the old
-// TransformViceProxyArgs.
+// cluster-config-secret envFrom, the permissions mount, and any configured CA
+// bundle — folding in the old TransformViceProxyArgs.
 func (c *Config) viceProxyContainer(spec *operatorclient.VICESpec) apiv1.Container {
 	backendURL := "http://localhost:60000"
 	if len(spec.Container.Ports) > 0 {
@@ -199,6 +200,21 @@ func (c *Config) viceProxyContainer(spec *operatorclient.VICESpec) apiv1.Contain
 				Optional:             &optional,
 			}},
 		}
+	}
+
+	// SSL_CERT_FILE is enough on its own: vice-proxy is a cgo-free Go binary
+	// that never sets its own RootCAs, so crypto/x509 picks this up for the
+	// back-channel token exchange with Keycloak.
+	if c.CABundleConfigMap != "" {
+		container.VolumeMounts = append(container.VolumeMounts, apiv1.VolumeMount{
+			Name:      constants.CABundleVolumeName,
+			MountPath: constants.CABundleMountPath,
+			ReadOnly:  true,
+		})
+		container.Env = append(container.Env, apiv1.EnvVar{
+			Name:  "SSL_CERT_FILE",
+			Value: filepath.Join(constants.CABundleMountPath, c.caBundleKey()),
+		})
 	}
 	return container
 }
@@ -352,19 +368,19 @@ func (c *Config) Deployment(spec *operatorclient.VICESpec) *appsv1.Deployment {
 			},
 			Template: apiv1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-			Spec: apiv1.PodSpec{
-				Hostname:                     common.Subdomain(spec.UserID, string(spec.ExternalID)),
-				RestartPolicy:                apiv1.RestartPolicyAlways,
-				Volumes:                      c.podVolumes(spec),
-				InitContainers:               c.initContainers(spec),
-				Containers:                   c.containers(spec),
-				ImagePullSecrets:             c.imagePullSecrets(),
-				AutomountServiceAccountToken: &autoMount,
-				DNSConfig: &apiv1.PodDNSConfig{
-					Options: []apiv1.PodDNSConfigOption{
-						{Name: "ndots", Value: constants.StringPtr("1")},
+				Spec: apiv1.PodSpec{
+					Hostname:                     common.Subdomain(spec.UserID, string(spec.ExternalID)),
+					RestartPolicy:                apiv1.RestartPolicyAlways,
+					Volumes:                      c.podVolumes(spec),
+					InitContainers:               c.initContainers(spec),
+					Containers:                   c.containers(spec),
+					ImagePullSecrets:             c.imagePullSecrets(),
+					AutomountServiceAccountToken: &autoMount,
+					DNSConfig: &apiv1.PodDNSConfig{
+						Options: []apiv1.PodDNSConfigOption{
+							{Name: "ndots", Value: constants.StringPtr("1")},
+						},
 					},
-				},
 					SecurityContext: &apiv1.PodSecurityContext{
 						RunAsUser:  uidPtr(spec),
 						RunAsGroup: uidPtr(spec),

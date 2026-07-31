@@ -83,6 +83,8 @@ type Operator struct {
 	gatewayProvider         string
 	imagePullSecretName     string
 	resourceDefaults        vicebuild.ResourceDefaults
+	caBundleConfigMap       string // ConfigMap in namespace holding the CA vice-proxy trusts; empty leaves the image's trust store alone.
+	caBundleKey             string
 	// disableSpecLaunch turns off the operator-side spec build path: the
 	// operator advertises SpecVersion 0 (so app-exposer routes it a legacy
 	// bundle) and rejects direct spec launches. The per-operator rollback lever.
@@ -127,6 +129,8 @@ type OperatorOptions struct {
 	GatewayProvider         string
 	ImagePullSecretName     string
 	ResourceDefaults        vicebuild.ResourceDefaults
+	CABundleConfigMap       string // ConfigMap in Namespace holding the CA vice-proxy trusts; empty leaves the image's trust store alone.
+	CABundleKey             string
 	DisableSpecLaunch       bool
 }
 
@@ -197,6 +201,8 @@ func NewOperator(opts OperatorOptions) (*Operator, error) {
 		gatewayProvider:         opts.GatewayProvider,
 		imagePullSecretName:     opts.ImagePullSecretName,
 		resourceDefaults:        opts.ResourceDefaults,
+		caBundleConfigMap:       opts.CABundleConfigMap,
+		caBundleKey:             opts.CABundleKey,
 		disableSpecLaunch:       opts.DisableSpecLaunch,
 	}, nil
 }
@@ -243,6 +249,8 @@ func (o *Operator) viceBuildConfig() vicebuild.Config {
 		LoadingServicePort:      o.loadingServicePort,
 		ImageRewriter:           rewriter,
 		Resources:               o.resourceDefaults,
+		CABundleConfigMap:       o.caBundleConfigMap,
+		CABundleKey:             o.caBundleKey,
 	}
 }
 

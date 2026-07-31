@@ -12,6 +12,7 @@ package vicebuild
 
 import (
 	"github.com/cyverse-de/app-exposer/common"
+	"github.com/cyverse-de/app-exposer/constants"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -53,6 +54,14 @@ type Config struct {
 	// Secrets.
 	ImagePullSecretName     string
 	ClusterConfigSecretName string
+
+	// CABundleConfigMap names a ConfigMap in Namespace holding the CA that
+	// vice-proxy must trust to reach Keycloak — needed only where the DE's
+	// certificates chain to a private CA. Empty adds no volume and no mount,
+	// leaving clusters with publicly-trusted certificates unaffected.
+	// CABundleKey is the key within it; empty means constants.CABundleKey.
+	CABundleConfigMap string
+	CABundleKey       string
 
 	// UserSuffix is appended to the submitter username where Keycloak expects
 	// the fully-qualified form (permissions ConfigMap, CSI proxy user).
@@ -110,6 +119,15 @@ type ResourceDefaults struct {
 	DoViceProxyCPULimit bool
 	DoViceProxyMemLimit bool
 	DoViceProxyStorage  bool
+}
+
+// caBundleKey returns the configured CA bundle key, defaulting to the
+// conventional ca.crt.
+func (c *Config) caBundleKey() string {
+	if c.CABundleKey == "" {
+		return constants.CABundleKey
+	}
+	return c.CABundleKey
 }
 
 // rewriteImage applies the configured image rewriter, or returns ref unchanged
