@@ -45,6 +45,12 @@ const (
 	PermissionsMountPath       = "/etc/vice-permissions"
 	PermissionsFileName        = "allowed-users"
 
+	// The CA bundle vice-proxy trusts when the DE's certificates chain to a
+	// private CA. Matches the mount path the DE services use.
+	CABundleVolumeName = "de-ca"
+	CABundleMountPath  = "/etc/de-ca"
+	CABundleKey        = "ca.crt"
+
 	InputPathListMountPath  = "/input-paths"
 	InputPathListFileName   = "input-path-list"
 	InputPathListVolumeName = "input-path-list"

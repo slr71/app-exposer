@@ -193,6 +193,56 @@ func TestViceProxyArgsFolded(t *testing.T) {
 	assert.True(t, hasPermsMount, "permissions volume mount present")
 }
 
+// TestViceProxyCABundle confirms the CA bundle reaches vice-proxy as both a
+// volume and SSL_CERT_FILE only when configured, so clusters with
+// publicly-trusted certificates keep an unchanged pod spec.
+func TestViceProxyCABundle(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		configMap string
+		key       string
+		wantEnv   string // empty means no volume, no mount, and no env var
+	}{
+		{name: "unset", configMap: "", wantEnv: ""},
+		{name: "default key", configMap: "local-ca", wantEnv: "/etc/de-ca/ca.crt"},
+		{name: "explicit key", configMap: "local-ca", key: "bundle.pem", wantEnv: "/etc/de-ca/bundle.pem"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.CABundleConfigMap = tt.configMap
+			cfg.CABundleKey = tt.key
+
+			dep := cfg.Deployment(testSpec())
+			proxy := findContainer(t, dep.Spec.Template.Spec.Containers, constants.VICEProxyContainerName)
+
+			var gotEnv string
+			for _, e := range proxy.Env {
+				if e.Name == "SSL_CERT_FILE" {
+					gotEnv = e.Value
+				}
+			}
+			assert.Equal(t, tt.wantEnv, gotEnv)
+
+			var mounted, volumed bool
+			for _, vm := range proxy.VolumeMounts {
+				if vm.Name == constants.CABundleVolumeName {
+					mounted = true
+					assert.True(t, vm.ReadOnly)
+				}
+			}
+			for _, v := range dep.Spec.Template.Spec.Volumes {
+				if v.Name == constants.CABundleVolumeName {
+					volumed = true
+					require.NotNil(t, v.ConfigMap)
+					assert.Equal(t, tt.configMap, v.ConfigMap.Name)
+				}
+			}
+			assert.Equal(t, tt.wantEnv != "", mounted, "CA volume mount presence")
+			assert.Equal(t, tt.wantEnv != "", volumed, "CA volume presence")
+		})
+	}
+}
+
 // TestImageRefsFolded confirms TransformImageRefs is folded in: a configured
 // rewriter is applied to every container image.
 func TestImageRefsFolded(t *testing.T) {

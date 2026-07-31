@@ -77,6 +77,8 @@ func main() {
 		disableInternetAccess bool
 		userSuffix            string
 		localStorageClass     string
+		caBundleConfigMap     string
+		caBundleKey           string
 		statusListenerURL     string
 		statusLeaseNamespace  string
 		statusLeaseName       string
@@ -169,6 +171,8 @@ func main() {
 	flag.BoolVar(&disableInternetAccess, "disable-internet-access", false, "Block analysis pods from reaching the public internet; only DNS, explicit host/CIDR exceptions, and pod exceptions are allowed")
 	flag.StringVar(&userSuffix, "user-suffix", constants.DefaultUserSuffix, "Domain suffix appended to usernames if not already present")
 	flag.StringVar(&localStorageClass, "local-storage-class", "", "StorageClass for the per-analysis working-dir PVC (e.g. openebs-hostpath, gp3); empty means use the cluster's default storage class")
+	flag.StringVar(&caBundleConfigMap, "ca-bundle-configmap", "", "ConfigMap in --namespace holding the CA that vice-proxy must trust to reach Keycloak; needed only where the DE's certificates chain to a private CA. Empty leaves the vice-proxy image's trust store alone.")
+	flag.StringVar(&caBundleKey, "ca-bundle-key", constants.CABundleKey, "Key within --ca-bundle-configmap holding the PEM bundle")
 	flag.StringVar(&statusListenerURL, "status-listener-url", "", "Base URL of job-status-listener (e.g. https://de.example.org/job); empty disables the push-based status informer and falls back to the reconciler's polling")
 	flag.StringVar(&statusLeaseNamespace, "status-lease-namespace", "", "Namespace for the status-publisher coordination Lease (defaults to --namespace)")
 	flag.StringVar(&statusLeaseName, "status-lease-name", "vice-operator-status-publisher", "Name of the coordination Lease used to elect the status-publisher leader")
@@ -496,6 +500,8 @@ func main() {
 		GatewayProvider:         gatewayProvider,
 		ImagePullSecretName:     imagePullSecret,
 		ResourceDefaults:        resourceDefaults,
+		CABundleConfigMap:       caBundleConfigMap,
+		CABundleKey:             caBundleKey,
 		DisableSpecLaunch:       disableSpecLaunch,
 	})
 	if err != nil {

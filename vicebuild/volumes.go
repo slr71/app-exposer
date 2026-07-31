@@ -314,6 +314,17 @@ func (c *Config) podVolumes(spec *operatorclient.VICESpec) []apiv1.Volume {
 		},
 	)
 
+	if c.CABundleConfigMap != "" {
+		volumes = append(volumes, apiv1.Volume{
+			Name: constants.CABundleVolumeName,
+			VolumeSource: apiv1.VolumeSource{
+				ConfigMap: &apiv1.ConfigMapVolumeSource{
+					LocalObjectReference: apiv1.LocalObjectReference{Name: c.CABundleConfigMap},
+				},
+			},
+		})
+	}
+
 	if spec.Resources.SharedMemoryBytes != nil {
 		size := resourcev1.NewQuantity(*spec.Resources.SharedMemoryBytes, resourcev1.BinarySI)
 		volumes = append(volumes, apiv1.Volume{
