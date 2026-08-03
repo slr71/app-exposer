@@ -121,13 +121,18 @@ type ResourceDefaults struct {
 	DoViceProxyStorage  bool
 }
 
-// caBundleKey returns the configured CA bundle key, defaulting to the
-// conventional ca.crt.
-func (c *Config) caBundleKey() string {
-	if c.CABundleKey == "" {
+// CABundleKeyOrDefault returns key, or the conventional ca.crt when empty. It
+// is the single rule for resolving --ca-bundle-key, shared by the pod builder
+// here and the operator's startup validation.
+func CABundleKeyOrDefault(key string) string {
+	if key == "" {
 		return constants.CABundleKey
 	}
-	return c.CABundleKey
+	return key
+}
+
+func (c *Config) caBundleKey() string {
+	return CABundleKeyOrDefault(c.CABundleKey)
 }
 
 // rewriteImage applies the configured image rewriter, or returns ref unchanged

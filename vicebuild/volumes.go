@@ -314,12 +314,18 @@ func (c *Config) podVolumes(spec *operatorclient.VICESpec) []apiv1.Volume {
 		},
 	)
 
+	// Naming the key in Items makes a mismatched --ca-bundle-key fail the pod
+	// with a kubelet event. Mounting the whole ConfigMap instead would leave
+	// SSL_CERT_FILE pointing at a missing file, which crypto/x509 ignores
+	// silently — reproducing the untrusted-CA error the bundle is there to fix.
 	if c.CABundleConfigMap != "" {
+		key := c.caBundleKey()
 		volumes = append(volumes, apiv1.Volume{
 			Name: constants.CABundleVolumeName,
 			VolumeSource: apiv1.VolumeSource{
 				ConfigMap: &apiv1.ConfigMapVolumeSource{
 					LocalObjectReference: apiv1.LocalObjectReference{Name: c.CABundleConfigMap},
+					Items:                []apiv1.KeyToPath{{Key: key, Path: key}},
 				},
 			},
 		})

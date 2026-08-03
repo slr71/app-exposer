@@ -3,7 +3,7 @@ package vicebuild
 import (
 	"fmt"
 	"net/url"
-	"path/filepath"
+	"path"
 
 	"github.com/cyverse-de/app-exposer/common"
 	"github.com/cyverse-de/app-exposer/constants"
@@ -204,7 +204,11 @@ func (c *Config) viceProxyContainer(spec *operatorclient.VICESpec) apiv1.Contain
 
 	// SSL_CERT_FILE is enough on its own: vice-proxy is a cgo-free Go binary
 	// that never sets its own RootCAs, so crypto/x509 picks this up for the
-	// back-channel token exchange with Keycloak.
+	// back-channel token exchange with Keycloak. It *replaces* the image's
+	// default bundle file rather than adding to it — public roots survive only
+	// because crypto/x509 also scans /etc/ssl/certs as a directory, where the
+	// vice-proxy image happens to leave ca-certificates.crt. Publish a full
+	// bundle if that ever stops being true.
 	if c.CABundleConfigMap != "" {
 		container.VolumeMounts = append(container.VolumeMounts, apiv1.VolumeMount{
 			Name:      constants.CABundleVolumeName,
@@ -213,7 +217,7 @@ func (c *Config) viceProxyContainer(spec *operatorclient.VICESpec) apiv1.Contain
 		})
 		container.Env = append(container.Env, apiv1.EnvVar{
 			Name:  "SSL_CERT_FILE",
-			Value: filepath.Join(constants.CABundleMountPath, c.caBundleKey()),
+			Value: path.Join(constants.CABundleMountPath, c.caBundleKey()),
 		})
 	}
 	return container

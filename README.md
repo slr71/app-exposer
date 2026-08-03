@@ -181,6 +181,12 @@ These configure the Keycloak client used by the vice-proxy sidecar inside each a
 | `--keycloak-client-id` | `""` | OIDC client ID for vice-proxy auth. |
 | `--keycloak-client-secret` | `""` | OIDC client secret for vice-proxy auth (or `KEYCLOAK_CLIENT_SECRET` env var). |
 | `--disable-vice-proxy-auth` | `false` | Disable auth in vice-proxy (development/testing only). |
+| `--ca-bundle-configmap` | `""` | ConfigMap in `--namespace` holding the CA vice-proxy must trust to reach Keycloak; needed only where the DE's certificates chain to a private CA. Mounted read-only at `/etc/de-ca` with `SSL_CERT_FILE` pointed at it. Empty leaves the vice-proxy image's trust store alone. |
+| `--ca-bundle-key` | `ca.crt` | Key within `--ca-bundle-configmap` holding the PEM bundle. |
+
+`SSL_CERT_FILE` replaces the vice-proxy image's default bundle file rather than adding to it, so the ConfigMap should hold every CA the sidecar needs — the private CA plus any public roots. The operator validates the ConfigMap and key at startup and exits if either is missing.
+
+The CA bundle only reaches analyses launched through the operator's spec build path. Setting `--disable-spec-launch` routes launches through app-exposer's legacy bundle, which has no CA bundle support; on a private-CA cluster that reverts vice-proxy to failing its Keycloak token exchange. The operator logs a warning at startup when both flags are set.
 
 ### Image Pull / Registry
 

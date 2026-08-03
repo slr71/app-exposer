@@ -1,6 +1,7 @@
 package vicebuild
 
 import (
+	"path"
 	"strings"
 	"testing"
 
@@ -235,6 +236,10 @@ func TestViceProxyCABundle(t *testing.T) {
 					volumed = true
 					require.NotNil(t, v.ConfigMap)
 					assert.Equal(t, tt.configMap, v.ConfigMap.Name)
+					// Projecting only the configured key is what turns a
+					// mismatched --ca-bundle-key into a pod that fails to start.
+					key := path.Base(tt.wantEnv)
+					assert.Equal(t, []apiv1.KeyToPath{{Key: key, Path: key}}, v.ConfigMap.Items)
 				}
 			}
 			assert.Equal(t, tt.wantEnv != "", mounted, "CA volume mount presence")

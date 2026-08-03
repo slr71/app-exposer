@@ -171,7 +171,7 @@ func main() {
 	flag.BoolVar(&disableInternetAccess, "disable-internet-access", false, "Block analysis pods from reaching the public internet; only DNS, explicit host/CIDR exceptions, and pod exceptions are allowed")
 	flag.StringVar(&userSuffix, "user-suffix", constants.DefaultUserSuffix, "Domain suffix appended to usernames if not already present")
 	flag.StringVar(&localStorageClass, "local-storage-class", "", "StorageClass for the per-analysis working-dir PVC (e.g. openebs-hostpath, gp3); empty means use the cluster's default storage class")
-	flag.StringVar(&caBundleConfigMap, "ca-bundle-configmap", "", "ConfigMap in --namespace holding the CA that vice-proxy must trust to reach Keycloak; needed only where the DE's certificates chain to a private CA. Empty leaves the vice-proxy image's trust store alone.")
+	flag.StringVar(&caBundleConfigMap, "ca-bundle-configmap", "", "ConfigMap in --namespace holding the CA that vice-proxy must trust to reach Keycloak; needed only where the DE's certificates chain to a private CA. It replaces the vice-proxy image's default bundle rather than adding to it, so publish a full bundle. Empty leaves the image's trust store alone.")
 	flag.StringVar(&caBundleKey, "ca-bundle-key", constants.CABundleKey, "Key within --ca-bundle-configmap holding the PEM bundle")
 	flag.StringVar(&statusListenerURL, "status-listener-url", "", "Base URL of job-status-listener (e.g. https://de.example.org/job); empty disables the push-based status informer and falls back to the reconciler's polling")
 	flag.StringVar(&statusLeaseNamespace, "status-lease-namespace", "", "Namespace for the status-publisher coordination Lease (defaults to --namespace)")
@@ -336,6 +336,17 @@ func main() {
 		mustEnsure("image pull secret", func(ctx context.Context) error {
 			return operator.EnsureImagePullSecret(ctx, clientset, namespace, imagePullSecret, registryServer, registryUsername, registryPassword)
 		})
+	}
+
+	// The CA bundle is mounted straight into analysis pods, so a bad name or
+	// key would otherwise only show up once a user tries to launch something.
+	if caBundleConfigMap != "" {
+		mustEnsure("CA bundle ConfigMap", func(ctx context.Context) error {
+			return operator.ValidateCABundle(ctx, clientset, namespace, caBundleConfigMap, caBundleKey)
+		})
+		if disableSpecLaunch {
+			log.Warnf("--ca-bundle-configmap is set but --disable-spec-launch routes launches through app-exposer's legacy bundle, which cannot mount a CA bundle; vice-proxy will not trust %s and its Keycloak token exchange will fail", caBundleConfigMap)
+		}
 	}
 
 	// Ensure the operator's K8s Services and API HTTPRoute exist so traffic
