@@ -9,6 +9,51 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// ExpirationDB is the narrow subset of *Database operations used by the
+// background analysis-expiration worker. As with ReconcilerDB it exists so the
+// worker can be unit-tested against a fake; the production *Database satisfies
+// it structurally.
+type ExpirationDB interface {
+	// ListExpiredAnalyses returns running analyses past their planned end date.
+	ListExpiredAnalyses(ctx context.Context) ([]Analysis, error)
+
+	// ListAnalysesExpiringWithin returns running analyses whose planned end
+	// date falls inside the given window.
+	ListAnalysesExpiringWithin(ctx context.Context, window time.Duration) ([]Analysis, error)
+
+	// ListAnalysesDueForPeriodicReminder returns running analyses whose last
+	// periodic reminder is older than their configured reminder period.
+	ListAnalysesDueForPeriodicReminder(ctx context.Context) ([]Analysis, error)
+
+	// GetAnalysisByExternalID returns the analysis owning an external ID, or
+	// sql.ErrNoRows when there is none.
+	GetAnalysisByExternalID(ctx context.Context, externalID constants.ExternalID) (*Analysis, error)
+
+	// IsInteractive reports whether the analysis has a VICE step.
+	IsInteractive(ctx context.Context, analysisID constants.AnalysisID) (bool, error)
+
+	// InitializeRuntime fills in the analysis's subdomain and planned end date
+	// when they are not already set, reporting whether it changed anything.
+	InitializeRuntime(ctx context.Context, analysisID constants.AnalysisID, userID, externalID string) (bool, error)
+
+	// EnsureNotifStatuses creates the analysis's notification-tracking row if
+	// it is missing.
+	EnsureNotifStatuses(ctx context.Context, analysisID constants.AnalysisID, externalID constants.ExternalID, periodicPeriodSeconds int) error
+
+	// ClaimNotifStatuses locks the analysis's notification-tracking row and
+	// runs fn against it, returning ErrNotClaimed if another replica holds it.
+	ClaimNotifStatuses(ctx context.Context, analysisID constants.AnalysisID, fn func(tx *sqlx.Tx, statuses *NotifStatuses) error) error
+
+	// SetWarningSent records delivery (or abandonment) of a notification.
+	SetWarningSent(ctx context.Context, tx *sqlx.Tx, kind WarningKind, analysisID constants.AnalysisID, sent bool) error
+
+	// SetWarningFailureCount records the failed-attempt count for a notification.
+	SetWarningFailureCount(ctx context.Context, tx *sqlx.Tx, kind WarningKind, analysisID constants.AnalysisID, count int) error
+
+	// SetLastPeriodicWarning records when the last periodic reminder was sent.
+	SetLastPeriodicWarning(ctx context.Context, tx *sqlx.Tx, analysisID constants.AnalysisID, sentAt time.Time) error
+}
+
 // ReconcilerDB is the narrow subset of *Database operations used by the
 // background reconciliation worker. It exists so the reconciler can be
 // unit-tested against a fake without pulling in a real Postgres. The

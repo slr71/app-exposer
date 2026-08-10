@@ -136,72 +136,11 @@ func (h *HTTPHandlers) operatorClientForAnalysis(ctx context.Context, analysisID
 	return client, nil
 }
 
-// searchOperatorsForAnalysis queries all configured operators in parallel
-// to find which one is running the given analysis. Returns (client, nil)
-// on success. Returns (nil, nil) when every operator responded and none
-// has the analysis — truly not found. Returns (nil, err) only when one
-// or more operators errored AND nothing reported found: in that case we
-// cannot distinguish "not running anywhere" from "hiding on a degraded
-// cluster", so the caller should surface the ambiguity (typically as 502)
-// rather than return 404.
+// searchOperatorsForAnalysis asks every operator which one is running the given
+// analysis. See Scheduler.FindAnalysis for the (nil, nil) vs (nil, err)
+// semantics — a miss is only authoritative when the error is nil.
 func (h *HTTPHandlers) searchOperatorsForAnalysis(ctx context.Context, analysisID constants.AnalysisID) (*operatorclient.Client, error) {
-	type result struct {
-		client *operatorclient.Client
-		found  bool
-		err    error
-	}
-
-	clients := h.scheduler.Clients()
-	if len(clients) == 0 {
-		return nil, nil
-	}
-
-	// Use a cancellable child context so we can stop remaining searches
-	// once we find the analysis.
-	searchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	ch := make(chan result, len(clients))
-
-	// wg.Go (Go 1.25+) handles Add/Done internally. Range variables are
-	// per-iteration in Go 1.22+ so no parameter capture is needed.
-	var wg sync.WaitGroup
-	for _, c := range clients {
-		wg.Go(func() {
-			found, err := c.HasAnalysis(searchCtx, analysisID)
-			if err != nil {
-				log.Warnf("search: operator %s error for analysis %s: %v", c.Name(), analysisID, err)
-				ch <- result{client: c, err: err}
-				return
-			}
-			ch <- result{client: c, found: found}
-		})
-	}
-
-	// Close the channel once all goroutines finish to avoid leaks.
-	go func() {
-		wg.Wait()
-		close(ch)
-	}()
-
-	var failed []string
-	for r := range ch {
-		if r.err != nil {
-			failed = append(failed, r.client.Name())
-			continue
-		}
-		if r.found {
-			cancel() // Signal remaining goroutines to stop.
-			return r.client, nil
-		}
-	}
-
-	// Nothing found. If any operator failed during the search, report the
-	// outage so the caller can return 502 rather than a misleading 404.
-	if len(failed) > 0 {
-		return nil, fmt.Errorf("analysis %s not found; %d operator(s) could not be checked: %v", analysisID, len(failed), failed)
-	}
-	return nil, nil
+	return h.scheduler.FindAnalysis(ctx, analysisID)
 }
 
 // operatorLabelParams is the set of query parameter names that the vice-operator

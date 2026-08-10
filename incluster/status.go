@@ -27,6 +27,14 @@ type JSLPublisher struct {
 	statusURL string
 }
 
+// NewJSLPublisher returns a publisher that posts status updates to the
+// job-status-listener at statusURL. Exported for packages outside incluster
+// that need to publish analysis status without an *Incluster — notably the
+// expiration worker, which marks vanished analyses Completed.
+func NewJSLPublisher(statusURL string) *JSLPublisher {
+	return &JSLPublisher{statusURL: statusURL}
+}
+
 // AnalysisStatus contains the data needed to post a status update to the
 // notification-agent service.
 type AnalysisStatus struct {

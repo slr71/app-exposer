@@ -391,3 +391,71 @@ func (s *Scheduler) ClientByID(id uuid.UUID) *Client {
 	}
 	return nil
 }
+
+// FindAnalysis asks every operator in parallel whether its cluster is running
+// the given analysis, and returns the client that reports it.
+//
+// This is the authoritative "is it actually deployed" check: each operator
+// answers from its own cluster resources rather than from anything recorded in
+// the DE database. Callers that can tolerate a cheaper answer should prefer a
+// recorded operator id (see ClientByID) and fall back to this.
+//
+// Returns (nil, nil) when every operator answered and none has the analysis —
+// genuinely not running. Returns (nil, err) only when one or more operators
+// errored and nothing reported found: in that case "not running anywhere" and
+// "hiding on a degraded cluster" are indistinguishable, so callers must not
+// treat the miss as authoritative.
+func (s *Scheduler) FindAnalysis(ctx context.Context, analysisID AnalysisID) (*Client, error) {
+	type result struct {
+		client *Client
+		found  bool
+		err    error
+	}
+
+	clients := s.Clients()
+	if len(clients) == 0 {
+		return nil, nil
+	}
+
+	// Cancellable child context so the remaining searches stop as soon as one
+	// operator claims the analysis.
+	searchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	ch := make(chan result, len(clients))
+
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		wg.Go(func() {
+			found, err := c.HasAnalysis(searchCtx, analysisID)
+			if err != nil {
+				log.Warnf("search: operator %s error for analysis %s: %v", c.Name(), analysisID, err)
+				ch <- result{client: c, err: err}
+				return
+			}
+			ch <- result{client: c, found: found}
+		})
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	var failed []string
+	for r := range ch {
+		if r.err != nil {
+			failed = append(failed, r.client.Name())
+			continue
+		}
+		if r.found {
+			cancel() // Signal the remaining goroutines to stop.
+			return r.client, nil
+		}
+	}
+
+	if len(failed) > 0 {
+		return nil, fmt.Errorf("analysis %s not found; %d operator(s) could not be checked: %v", analysisID, len(failed), failed)
+	}
+	return nil, nil
+}

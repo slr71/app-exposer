@@ -39,12 +39,18 @@ A single Docker image ships both `app-exposer` and `vice-operator`.
 - `batch/` — Argo Workflows job builder
 - `common/` — shared logger, error responses, label helpers, `FixUsername`
 - `constants/` — k8s label/annotation constants
-- `db/` — sqlx-backed DB access (operators table, analyses, …)
+- `db/` — sqlx-backed DB access (operators table, analyses, notif_statuses, …)
+- `expiration/` — background worker enforcing VICE analysis time limits (was the
+  standalone `timelord` service); also consumes `jobs.updates` from AMQP to
+  backfill an analysis's subdomain / planned end date
 - `httphandlers/` — Echo handlers, split per feature (e.g. `launch.go`, `exit.go`)
 - `imageinfo/` — Harbor image-info queries
 - `incluster/` — k8s-native VICE launch logic (Deployments, Services, Ingresses)
 - `instantlaunches/` — quick-launch saved configs
+- `iplantgroups/` — iplant-groups client, used to resolve a user's email address
 - `millicores/` — CPU quantity helpers
+- `notifications/` — notification-agent client for analysis expiry warnings,
+  periodic "still running" reminders, and termination notices
 - `operator/` — vice-operator server-side logic (capacity calc, gateway/loading pages, status informer)
 - `operatorclient/` — HTTP client app-exposer uses to talk to vice-operator
 - `outcluster/` — **legacy** HTCondor path (Services/Endpoints/Ingresses for non-k8s apps); only touch if the task explicitly calls for it
@@ -74,6 +80,9 @@ Loaded via **koanf**, not a typed struct. Sources in order: file (`/etc/de/app-e
 
 - Template with all keys: `configs/default.yml`
 - Access pattern: `cfg.String("k8s.frontend.base")`, `cfg.Bool(...)`, etc. There is no compile-time check that a key exists, so typos are runtime errors.
+- The expiration worker adds `amqp.*`, `iplant_groups.*`, and
+  `notification_agent.base`. `iplant_groups.user` is required (startup fails
+  without it); an empty `amqp.uri` disables only the runtime backfill.
 - Kubeconfig: `~/.kube/config` by default; setting the `CLUSTER` env var switches to in-cluster config.
 - Important namespace flags: `--namespace` (default `default`, used for outcluster resources) and `--vice-namespace` (default `vice-apps`, where VICE pods run).
 - Local-dev TLS certs and a sample service listing live in `local-config/`.
@@ -106,6 +115,17 @@ Every package does `var log = common.Log`. Caller reporting is on. Level is set 
 - **DB calls require a `Tx`** — never operate outside a transaction, and thread `context.Context` end-to-end (use `*Context` variants like `ExecContext`/`QueryRowContext`).
 - **Sanitize DB errors** in HTTP responses (map `sql.ErrNoRows` → 404, others → 500; log the real error server-side).
 - **No CRDs defined here** — vice-operator uses the upstream k8s Gateway API (`sigs.k8s.io/gateway-api`).
+- **`jobs.subdomain` and `jobs.planned_end_date` have one writer**: the VICE
+  launch handler, via `db.InitializeRuntime`. The `expiration` package's AMQP
+  consumer only backfills them and logs at warn level when it has to. Always
+  derive a subdomain with `common.Subdomain` — a second implementation that
+  drifts makes analyses unroutable.
+- **Both timestamps are naive `timestamp` columns holding local wall-clock
+  time.** Read them through `AT TIME ZONE current_setting('TimeZone')`; reading
+  them raw shifts every duration by the local UTC offset.
+- **The expiration worker runs in every replica.** Anything that must happen once
+  per analysis takes the `notif_statuses` row with `FOR UPDATE SKIP LOCKED`
+  (`db.ClaimNotifStatuses`) rather than read-then-write.
 - **Two Swagger doc trees**: `docs/` for app-exposer, `operatordocs/` for vice-operator (instance name `operator`); regenerate with `just docs` / `just operator-docs`.
 - **`outcluster/` is legacy HTCondor support** — avoid modernizing it unless the task asks.
 - **Files over ~300 lines** should be split by entity/feature (`launch.go`, `exit.go`, …) — follow the existing pattern in `httphandlers/`.
@@ -114,6 +134,11 @@ Every package does `var log = common.Log`. Caller reporting is on. Level is set 
 
 - `apps` (Clojure) — app catalog and job submission; calls `POST /vice/launch` and `POST /vice/{uuid}/save-and-exit`.
 - `terrain` (Clojure) — API gateway; calls app-exposer for VICE management.
+- `notification-agent` — receives the analysis notifications the `expiration`
+  worker emits.
+- `iplant-groups` — resolves a username to an email address for those notifications.
+- `job-status-listener` — receives the `Completed` status the expiration worker
+  publishes for analyses that already left every cluster.
 
 ## Pointers
 

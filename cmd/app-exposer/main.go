@@ -19,6 +19,7 @@ import (
 	"github.com/cyverse-de/app-exposer/apps"
 	"github.com/cyverse-de/app-exposer/common"
 	"github.com/cyverse-de/app-exposer/db"
+	"github.com/cyverse-de/app-exposer/expiration"
 	"github.com/cyverse-de/app-exposer/httphandlers"
 	"github.com/cyverse-de/app-exposer/imageinfo"
 	"github.com/cyverse-de/app-exposer/millicores"
@@ -106,6 +107,8 @@ func main() {
 		batchExitHandlerImage                = flag.String("batch-exit-handler-image", "harbor.cyverse.org/de/batch-exit-handler:latest", "The image to use for the exitHandler in batch workflows")
 		clusterConfigSecret                  = flag.String("cluster-config-secret", "cluster-config-secret", "Name of a Secret to inject as env vars into the vice-proxy container via envFrom. Used to provide cluster-specific config for multi-cluster deployments.")
 		maxConcurrentLaunches                = flag.Int("max-concurrent-launches", httphandlers.DefaultMaxConcurrentLaunches, "Upper bound on in-flight VICE launches per app-exposer instance; bursts beyond this return 503 so clients can back off.")
+		expirationSweepInterval              = flag.Duration("expiration-sweep-interval", expiration.DefaultSweepInterval, "How often to check running analyses for expiry warnings and terminations.")
+		expiryWarning                        = flag.Duration("expiry-warning", expiration.DefaultExpiryWarning, "How far ahead of an analysis's planned end date to send the short-notice expiry warning.")
 	)
 
 	var tracerCtx, cancel = context.WithCancel(context.Background())
@@ -390,6 +393,11 @@ func main() {
 	// Initialize and start the status reconciliation worker.
 	reconciler := reconciler.New(dbase, app.handlers.GetScheduler(), tokenSource)
 	go reconciler.Run(context.Background())
+
+	// Initialize and start the analysis expiration worker, which warns users
+	// about analyses nearing their time limit and terminates the ones that pass
+	// it. This ran as the standalone `timelord` service before it moved here.
+	startExpirationWorker(context.Background(), c, dbase, app.handlers.GetScheduler(), jobStatusBase(c), *expirationSweepInterval, *expiryWarning)
 
 	log.Printf("listening on port %d", *listenPort)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *listenPort), app.router))

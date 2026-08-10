@@ -94,6 +94,18 @@ test-imageinfo:
 test-common:
     go test ./common
 
+test-db:
+    go test ./db/...
+
+test-expiration:
+    go test ./expiration/...
+
+test-iplantgroups:
+    go test ./iplantgroups/...
+
+test-notifications:
+    go test ./notifications/...
+
 test-operator:
     go test ./operator/...
 
@@ -127,7 +139,7 @@ test-vice-bundle:
 test-vice-userid:
     go test ./cmd/vice-userid/...
 
-test: test-imageinfo test-common test-operator test-operatorclient test-app-exposer test-vice-operator test-vice-operator-tool test-vice-export test-vice-import test-vice-launch test-vice-list test-vice-bundle test-vice-userid
+test: test-imageinfo test-common test-db test-expiration test-iplantgroups test-notifications test-operator test-operatorclient test-app-exposer test-vice-operator test-vice-operator-tool test-vice-export test-vice-import test-vice-launch test-vice-list test-vice-bundle test-vice-userid
 
 fmt-docs:
     swag fmt -g app.go -d cmd/app-exposer/,httphandlers/,common/,incluster/

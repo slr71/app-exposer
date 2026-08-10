@@ -192,6 +192,15 @@ func (h *HTTPHandlers) launchAsync(job *model.Job) {
 		log.Errorf("async launch %s: failed to set operator id: %v", job.ID, err)
 	}
 
+	// Derive the analysis's routing subdomain and planned end date. The launch
+	// handler is the canonical writer of both; the expiration package's
+	// job-status consumer backfills them only for analyses that miss this
+	// write. Best-effort for the same reason as SetOperatorID above — a failure
+	// is recovered by that backfill rather than failing the launch.
+	if _, err := h.db.InitializeRuntime(ctx, analysisID, job.UserID, job.InvocationID); err != nil {
+		log.Errorf("async launch %s: failed to set the subdomain and planned end date: %v", job.ID, err)
+	}
+
 	log.Infof("async launch %s: successfully launched on operator %s (id=%s)", job.ID, operatorName, operatorID)
 }
 
