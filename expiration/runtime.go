@@ -98,14 +98,23 @@ func (r *RuntimeBackfill) backfill(ctx context.Context, externalID constants.Ext
 		return
 	}
 
-	changed, err := r.db.InitializeRuntime(ctx, analysis.ID, analysis.UserID, string(externalID))
+	initializeRuntime(ctx, r.db, analysis, externalID, msgLog)
+}
+
+// initializeRuntime fills in an interactive analysis's subdomain and planned end
+// date if they are missing, logging at warn level when it had to: in steady
+// state the launch handler has already written both, so anything repaired here
+// means an analysis was launched by an older app-exposer or its launch-time
+// write failed.
+func initializeRuntime(ctx context.Context, database db.ExpirationDB, analysis *db.Analysis, externalID constants.ExternalID, entry *logrus.Entry) {
+	changed, err := database.InitializeRuntime(ctx, analysis.ID, analysis.UserID, string(externalID))
 	if err != nil {
-		msgLog.Errorf("backfilling the subdomain and planned end date: %v", err)
+		entry.Errorf("backfilling the subdomain and planned end date: %v", err)
 		return
 	}
 
 	if changed {
-		msgLog.Warnf(
+		entry.Warnf(
 			"backfilled the subdomain and/or planned end date for analysis %s; "+
 				"the launch handler should have set these, so this analysis was "+
 				"either launched by an older app-exposer or its launch-time write failed",

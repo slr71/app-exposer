@@ -7,6 +7,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/cyverse-de/app-exposer/common"
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -143,4 +144,51 @@ func TestInitializeRuntimeSurfacesATimeLimitFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "determining time limit")
 	assert.False(t, changed)
+}
+
+// newRegexpTestDB matches expectations as regular expressions so a test can pin
+// the one predicate it cares about instead of restating the whole shared
+// analysis projection.
+func newRegexpTestDB(t *testing.T) (*Database, sqlmock.Sqlmock) {
+	t.Helper()
+	rawDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rawDB.Close() })
+	return New(sqlx.NewDb(rawDB, "postgres"), ""), mock
+}
+
+// TestListAnalysesDueForPeriodicReminderPacesFromTheLastReminder pins the
+// pacing to match the worker's reminderDue check. An analysis returned here but
+// not actually due costs a tracking-row insert and a row lock on every sweep, on
+// every replica, and records nothing that would stop it happening again ten
+// seconds later.
+func TestListAnalysesDueForPeriodicReminderPacesFromTheLastReminder(t *testing.T) {
+	database, mock := newRegexpTestDB(t)
+
+	mock.ExpectQuery(`GREATEST\(jobs\.start_date, notif_statuses\.last_periodic_warning\)\s+<\s+now\(\) - COALESCE\(notif_statuses\.periodic_warning_period`).
+		WithArgs(runningStatus).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	analyses, err := database.ListAnalysesDueForPeriodicReminder(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, analyses)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestListAnalysesMissingRuntimeExcludesBatchAnalyses pins the interactive
+// filter. Batch analyses legitimately have neither a subdomain nor a planned end
+// date, so without it every running HPC job would come back on every sweep.
+func TestListAnalysesMissingRuntimeExcludesBatchAnalyses(t *testing.T) {
+	database, mock := newRegexpTestDB(t)
+
+	mock.ExpectQuery(`planned_end_date IS NULL OR COALESCE\(jobs\.subdomain, ''\) = ''[\s\S]*jt\.name = 'Interactive'`).
+		WithArgs(runningStatus).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	analyses, err := database.ListAnalysesMissingRuntime(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, analyses)
+	assert.NoError(t, mock.ExpectationsWereMet())
 }

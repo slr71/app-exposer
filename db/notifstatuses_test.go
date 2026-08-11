@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/cyverse-de/app-exposer/constants"
@@ -246,18 +245,19 @@ func TestWarningStatementsRejectAnUnknownKind(t *testing.T) {
 
 func TestSetLastPeriodicWarning(t *testing.T) {
 	database, mock := newTestDB(t)
-	sentAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 
+	// The timestamp comes from the database, not from Go: the column is naive
+	// and holds local wall-clock time.
 	mock.ExpectBegin()
-	mock.ExpectExec(`UPDATE notif_statuses SET last_periodic_warning = $2 WHERE analysis_id = $1`).
-		WithArgs(testAnalysisID, sentAt).
+	mock.ExpectExec(`UPDATE notif_statuses SET last_periodic_warning = now()::timestamp WHERE analysis_id = $1`).
+		WithArgs(testAnalysisID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	tx, err := database.db.BeginTxx(context.Background(), nil)
 	require.NoError(t, err)
 
-	require.NoError(t, database.SetLastPeriodicWarning(context.Background(), tx, testAnalysisID, sentAt))
+	require.NoError(t, database.SetLastPeriodicWarning(context.Background(), tx, testAnalysisID))
 	require.NoError(t, tx.Commit())
 
 	assert.NoError(t, mock.ExpectationsWereMet())

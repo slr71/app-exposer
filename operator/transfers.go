@@ -54,7 +54,9 @@ type transferStatus struct {
 }
 
 // HandleSaveAndExit triggers the file transfer sidecar to upload outputs,
-// then deletes all analysis resources.
+// then deletes all analysis resources. A request for an analysis whose
+// save-and-exit is already running is accepted and dropped rather than started
+// a second time — see saveAndExitInFlight.
 //
 //	@Summary		Save outputs and exit
 //	@Description	Triggers the file-transfer sidecar to upload output files,
@@ -72,6 +74,11 @@ func (o *Operator) HandleSaveAndExit(c echo.Context) error {
 
 	log.Infof("save-and-exit requested for analysis %s", analysisID)
 
+	if _, running := o.saveAndExitInFlight.LoadOrStore(analysisID, struct{}{}); running {
+		log.Infof("save-and-exit is already running for analysis %s; ignoring the duplicate request", analysisID)
+		return c.NoContent(http.StatusAccepted)
+	}
+
 	// Run transfer + cleanup asynchronously with a detached, lifetime-bounded
 	// context so the caller doesn't block and a stuck sidecar can't leak the
 	// goroutine.
@@ -80,6 +87,10 @@ func (o *Operator) HandleSaveAndExit(c echo.Context) error {
 	// response is sent, the user has no visibility into a failed transfer
 	// today beyond the log line below.
 	go func() {
+		// Released even on failure, so a save-and-exit that could not finish is
+		// retried by the next request rather than blocked forever.
+		defer o.saveAndExitInFlight.Delete(analysisID)
+
 		bgCtx, cancel := context.WithTimeout(context.Background(), maxTransferLifetime)
 		defer cancel()
 

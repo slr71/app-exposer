@@ -9,6 +9,7 @@ import (
 
 	"github.com/cyverse-de/app-exposer/constants"
 	"github.com/cyverse-de/app-exposer/db"
+	"github.com/cyverse-de/app-exposer/operatorclient"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,9 +19,11 @@ import (
 // bookkeeping the worker performs so assertions can be made against it, and
 // per-method errors can be injected to exercise the failure paths.
 type fakeExpirationDB struct {
-	expiring  []db.Analysis
-	expired   []db.Analysis
-	periodic  []db.Analysis
+	expiring       []db.Analysis
+	expired        []db.Analysis
+	periodic       []db.Analysis
+	missingRuntime []db.Analysis
+
 	byExtID   map[constants.ExternalID]*db.Analysis
 	statuses  map[constants.AnalysisID]*db.NotifStatuses
 	claimedBy map[constants.AnalysisID]bool // true => another replica holds the row
@@ -28,11 +31,12 @@ type fakeExpirationDB struct {
 	interactive bool
 
 	// Injected errors (nil by default).
-	expiringErr error
-	expiredErr  error
-	periodicErr error
-	ensureErr   error
-	initErr     error
+	expiringErr       error
+	expiredErr        error
+	periodicErr       error
+	missingRuntimeErr error
+	ensureErr         error
+	initErr           error
 
 	// Recorded side effects.
 	ensured        []constants.AnalysisID
@@ -69,6 +73,10 @@ func (f *fakeExpirationDB) ListAnalysesExpiringWithin(context.Context, time.Dura
 
 func (f *fakeExpirationDB) ListAnalysesDueForPeriodicReminder(context.Context) ([]db.Analysis, error) {
 	return f.periodic, f.periodicErr
+}
+
+func (f *fakeExpirationDB) ListAnalysesMissingRuntime(context.Context) ([]db.Analysis, error) {
+	return f.missingRuntime, f.missingRuntimeErr
 }
 
 func (f *fakeExpirationDB) GetAnalysisByExternalID(_ context.Context, externalID constants.ExternalID) (*db.Analysis, error) {
@@ -129,8 +137,8 @@ func (f *fakeExpirationDB) SetWarningFailureCount(_ context.Context, _ *sqlx.Tx,
 	return nil
 }
 
-func (f *fakeExpirationDB) SetLastPeriodicWarning(_ context.Context, _ *sqlx.Tx, analysisID constants.AnalysisID, sentAt time.Time) error {
-	f.lastPeriodic[analysisID] = sentAt
+func (f *fakeExpirationDB) SetLastPeriodicWarning(_ context.Context, _ *sqlx.Tx, analysisID constants.AnalysisID) error {
+	f.lastPeriodic[analysisID] = time.Now()
 	return nil
 }
 
@@ -158,6 +166,21 @@ func (f *fakeNotifier) NotifyStillRunning(_ context.Context, a *db.Analysis) err
 	f.stillRunning = append(f.stillRunning, a.ID)
 	return f.err
 }
+
+// fakeStatusPublisher records the analysis status updates the worker publishes
+// for analyses it reconciles without terminating.
+type fakeStatusPublisher struct {
+	succeeded []string
+}
+
+func (f *fakeStatusPublisher) Fail(context.Context, string, string) error { return nil }
+
+func (f *fakeStatusPublisher) Success(_ context.Context, jobID, _ string) error {
+	f.succeeded = append(f.succeeded, jobID)
+	return nil
+}
+
+func (f *fakeStatusPublisher) Running(context.Context, string, string) error { return nil }
 
 func timePtr(t time.Time) *time.Time { return &t }
 
@@ -460,4 +483,105 @@ func TestSweepSurvivesAPanic(t *testing.T) {
 
 	require.NotPanics(t, func() { w.sweep(context.Background()) },
 		"a panic in the sweep must not escape and take app-exposer's API down with it")
+}
+
+// TestHandleIndeterminate covers what happens to an expired analysis the worker
+// cannot locate. Marking one Completed ends it in the DE without saving its
+// outputs, so the bar for doing that on an inconclusive answer is high — but
+// never doing it strands the analysis in Running and holds the user's quota.
+func TestHandleIndeterminate(t *testing.T) {
+	const id = constants.AnalysisID("analysis-1")
+
+	pastEnd := func(d time.Duration) *time.Time { return timePtr(time.Now().Add(-d)) }
+
+	tests := []struct {
+		name          string
+		err           error
+		plannedEnd    *time.Time
+		wantCompleted bool
+	}{
+		{
+			name:       "an empty scheduler is never authoritative",
+			err:        operatorclient.ErrNoOperators,
+			plannedEnd: pastEnd(time.Minute),
+		},
+		{
+			name:       "an empty scheduler stays inconclusive past the grace period",
+			err:        operatorclient.ErrNoOperators,
+			plannedEnd: pastEnd(terminationGracePeriod + time.Hour),
+		},
+		{
+			name:       "an unreachable operator is retried inside the grace period",
+			err:        errors.New("operator unreachable"),
+			plannedEnd: pastEnd(time.Minute),
+		},
+		{
+			name:          "an unreachable operator is given up on past the grace period",
+			err:           errors.New("operator unreachable"),
+			plannedEnd:    pastEnd(terminationGracePeriod + time.Hour),
+			wantCompleted: true,
+		},
+		{
+			name:       "an analysis with no planned end date is never given up on",
+			err:        errors.New("operator unreachable"),
+			plannedEnd: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := &fakeStatusPublisher{}
+			w := New(newFakeDB(), &fakeNotifier{}, nil, status, Init{})
+
+			analysis := testAnalysis(id)
+			analysis.PlannedEndDate = tt.plannedEnd
+
+			w.handleIndeterminate(context.Background(), &analysis, tt.err)
+
+			if tt.wantCompleted {
+				assert.Equal(t, []string{string(analysis.ExternalID)}, status.succeeded)
+			} else {
+				assert.Empty(t, status.succeeded)
+			}
+		})
+	}
+}
+
+// TestRepairRuntime covers the sweep-driven repair of the runtime fields. It is
+// the safety net that is always present: the AMQP consumer that does the same
+// job only exists when amqp.uri is configured.
+func TestRepairRuntime(t *testing.T) {
+	t.Run("analyses missing runtime fields are initialized", func(t *testing.T) {
+		database := newFakeDB()
+		database.missingRuntime = []db.Analysis{testAnalysis("analysis-1"), testAnalysis("analysis-2")}
+
+		newTestWorker(database, &fakeNotifier{}).repairRuntime(context.Background())
+
+		assert.Equal(t,
+			[]constants.AnalysisID{"analysis-1", "analysis-2"},
+			database.initRuntimeFor,
+		)
+	})
+
+	t.Run("an analysis with no external ID is skipped", func(t *testing.T) {
+		database := newFakeDB()
+		analysis := testAnalysis("analysis-1")
+		analysis.ExternalID = ""
+		database.missingRuntime = []db.Analysis{analysis}
+
+		newTestWorker(database, &fakeNotifier{}).repairRuntime(context.Background())
+
+		assert.Empty(t, database.initRuntimeFor,
+			"there is no external ID to derive a subdomain from yet")
+	})
+
+	t.Run("a listing failure does not stop the sweep", func(t *testing.T) {
+		database := newFakeDB()
+		database.missingRuntimeErr = assert.AnError
+
+		require.NotPanics(t, func() {
+			newTestWorker(database, &fakeNotifier{}).repairRuntime(context.Background())
+		})
+		assert.Empty(t, database.initRuntimeFor)
+	})
 }

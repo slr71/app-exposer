@@ -401,10 +401,11 @@ func (s *Scheduler) ClientByID(id uuid.UUID) *Client {
 // recorded operator id (see ClientByID) and fall back to this.
 //
 // Returns (nil, nil) when every operator answered and none has the analysis —
-// genuinely not running. Returns (nil, err) only when one or more operators
-// errored and nothing reported found: in that case "not running anywhere" and
-// "hiding on a degraded cluster" are indistinguishable, so callers must not
-// treat the miss as authoritative.
+// genuinely not running. Returns (nil, err) when one or more operators errored
+// and nothing reported found, and ErrNoOperators when there was nobody to ask:
+// in both cases "not running anywhere" and "hiding on a cluster we couldn't
+// reach" are indistinguishable, so callers must not treat the miss as
+// authoritative.
 func (s *Scheduler) FindAnalysis(ctx context.Context, analysisID AnalysisID) (*Client, error) {
 	type result struct {
 		client *Client
@@ -414,7 +415,7 @@ func (s *Scheduler) FindAnalysis(ctx context.Context, analysisID AnalysisID) (*C
 
 	clients := s.Clients()
 	if len(clients) == 0 {
-		return nil, nil
+		return nil, ErrNoOperators
 	}
 
 	// Cancellable child context so the remaining searches stop as soon as one

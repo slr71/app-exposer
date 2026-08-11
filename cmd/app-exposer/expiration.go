@@ -29,9 +29,10 @@ func jobStatusBase(c *koanf.Koanf) string {
 }
 
 // startExpirationWorker builds and starts the analysis expiration worker along
-// with the runtime backfill that feeds it. Configuration problems here are
-// fatal: without them the DE would silently stop enforcing analysis time
-// limits, which is worse than failing to start.
+// with the runtime backfill that feeds it. Missing configuration degrades the
+// worker rather than stopping the process: this is secondary to app-exposer's
+// API, and taking VICE launches down over a notification setting trades a small
+// problem for a much larger one.
 func startExpirationWorker(
 	ctx context.Context,
 	c *koanf.Koanf,
@@ -47,12 +48,14 @@ func startExpirationWorker(
 
 	groupsUser := c.String("iplant_groups.user")
 	if groupsUser == "" {
-		log.Fatal("iplant_groups.user must be set in the config file; iplant-groups rejects subject lookups without it, which would leave every analysis notification without an email address")
+		log.Warn("iplant_groups.user is not set in the config file; iplant-groups rejects subject lookups without it, " +
+			"so analysis notifications will reach the DE UI but carry no email address")
 	}
 
 	subjects, err := iplantgroups.New(groupsBase, groupsUser)
 	if err != nil {
-		log.Fatal(err)
+		log.Errorf("building the iplant-groups client, so analysis time limits will not be enforced: %v", err)
+		return
 	}
 
 	notificationAgentBase := c.String("notification_agent.base")
@@ -62,7 +65,8 @@ func startExpirationWorker(
 
 	notifier, err := notifications.New(notificationAgentBase, c.String("k8s.frontend.base"), subjects)
 	if err != nil {
-		log.Fatal(err)
+		log.Errorf("building the notification client, so analysis time limits will not be enforced: %v", err)
+		return
 	}
 
 	worker := expiration.New(

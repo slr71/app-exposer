@@ -98,18 +98,55 @@ func (d *Database) ListAnalysesExpiringWithin(ctx context.Context, window time.D
 }
 
 // ListAnalysesDueForPeriodicReminder returns the running analyses that have not
-// yet expired and whose last periodic reminder is older than their configured
-// reminder period. Analyses with no notif_statuses row yet are included: their
-// first reminder is due immediately.
+// yet expired and whose reminder period has elapsed.
+//
+// The period is measured from the analysis's last reminder, or from its start
+// date when it has had none, which is what keeps a freshly launched analysis
+// from being reminded immediately. That pacing has to match the worker's
+// reminderDue check: an analysis returned here but not yet due costs a
+// tracking-row insert and a row lock on every sweep, on every replica, and
+// records nothing to stop it happening again ten seconds later. GREATEST
+// ignores NULLs in Postgres, so it doubles as the has-no-reminder-yet case.
 func (d *Database) ListAnalysesDueForPeriodicReminder(ctx context.Context) ([]Analysis, error) {
 	const query = analysisColumns + `
 		  LEFT JOIN notif_statuses ON jobs.id = notif_statuses.analysis_id
 		 WHERE jobs.status = $1
+		   AND jobs.start_date IS NOT NULL
 		   AND jobs.planned_end_date > now()
-		   AND (notif_statuses.last_periodic_warning IS NULL
-		    OR notif_statuses.last_periodic_warning <
-		       now() - COALESCE(notif_statuses.periodic_warning_period, '4 hours'::interval))
+		   AND GREATEST(jobs.start_date, notif_statuses.last_periodic_warning) <
+		       now() - COALESCE(notif_statuses.periodic_warning_period, '4 hours'::interval)
 	`
+	analyses := []Analysis{}
+	err := d.db.SelectContext(ctx, &analyses, query, runningStatus)
+	return analyses, err
+}
+
+// interactiveAnalysis is the predicate identifying an analysis with a VICE
+// step, written against jobs.id so the queries that must exclude batch analyses
+// and IsInteractive share one definition of "interactive".
+const interactiveAnalysis = `
+	EXISTS (SELECT 1
+	          FROM job_steps js
+	          JOIN job_types jt ON js.job_type_id = jt.id
+	         WHERE js.job_id = jobs.id
+	           AND jt.name = 'Interactive')
+`
+
+// ListAnalysesMissingRuntime returns the running VICE analyses that reached
+// Running without a subdomain or a planned end date.
+//
+// These are the analyses the launch-time write missed. Left alone, one is
+// unroutable — the DE cannot build its access URL without a subdomain — and
+// invisible to ListExpiredAnalyses, since a NULL planned end date never
+// compares true against now(), so it would run until an admin killed it.
+//
+// Batch analyses are excluded: they legitimately have neither field, and
+// without the filter every running HPC job would come back on every sweep.
+func (d *Database) ListAnalysesMissingRuntime(ctx context.Context) ([]Analysis, error) {
+	const query = analysisColumns + `
+		 WHERE jobs.status = $1
+		   AND (jobs.planned_end_date IS NULL OR COALESCE(jobs.subdomain, '') = '')
+		   AND ` + interactiveAnalysis
 	analyses := []Analysis{}
 	err := d.db.SelectContext(ctx, &analyses, query, runningStatus)
 	return analyses, err
@@ -132,14 +169,12 @@ func (d *Database) GetAnalysisByExternalID(ctx context.Context, externalID const
 }
 
 // IsInteractive reports whether any of the analysis's steps is a VICE
-// (Interactive) step.
+// (Interactive) step. An analysis the DE has no record of is not interactive.
 func (d *Database) IsInteractive(ctx context.Context, analysisID constants.AnalysisID) (bool, error) {
 	const query = `
-		SELECT EXISTS (SELECT 1
-		                 FROM job_steps js
-		                 JOIN job_types jt ON js.job_type_id = jt.id
-		                WHERE js.job_id = $1
-		                  AND jt.name = 'Interactive')
+		SELECT COALESCE((SELECT ` + interactiveAnalysis + `
+		                   FROM jobs
+		                  WHERE jobs.id = $1), FALSE)
 	`
 	var interactive bool
 	err := d.db.QueryRowContext(ctx, query, analysisID).Scan(&interactive)

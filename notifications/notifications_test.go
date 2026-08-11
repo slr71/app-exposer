@@ -225,12 +225,6 @@ func TestNotifierErrors(t *testing.T) {
 			wantErrMsg: "500",
 		},
 		{
-			name:       "a failed subject lookup is an error",
-			status:     http.StatusOK,
-			subjects:   &fakeSubjects{err: assert.AnError},
-			wantErrMsg: "resolving email address",
-		},
-		{
 			name:     "a missing planned end date is an error",
 			status:   http.StatusOK,
 			subjects: &fakeSubjects{subject: &iplantgroups.Subject{}},
@@ -264,6 +258,21 @@ func TestNotifierErrors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErrMsg)
 		})
 	}
+}
+
+// TestFailedSubjectLookupStillNotifies pins the degraded path: the DE UI
+// notification is how a user learns their analysis is ending, so an email
+// address that cannot be resolved downgrades the notification rather than
+// dropping it.
+func TestFailedSubjectLookupStillNotifies(t *testing.T) {
+	notifier, captured := notifierForTest(t, &fakeSubjects{err: assert.AnError}, http.StatusOK, "https://cyverse.run")
+
+	require.NoError(t, notifier.NotifyTerminated(context.Background(), testAnalysis()))
+
+	var sent Notification
+	require.NoError(t, json.Unmarshal(*captured, &sent))
+	assert.False(t, sent.Email, "the notification should be downgraded to in-app only")
+	assert.Empty(t, sent.Payload.Email)
 }
 
 func TestAccessURL(t *testing.T) {
@@ -323,6 +332,12 @@ func TestShortDuration(t *testing.T) {
 		{name: "rounds to the nearest minute", d: 42*time.Minute + 31*time.Second, want: "0:43"},
 		{name: "single-digit hours", d: 3*time.Hour + 5*time.Minute, want: "3:05"},
 		{name: "multi-digit hours", d: 72*time.Hour + 15*time.Minute, want: "72:15"},
+
+		// The termination notice reports the time remaining on an analysis
+		// that is already past its planned end date, so negative durations
+		// reach users and must carry a single leading sign.
+		{name: "minutes past the planned end date", d: -15 * time.Minute, want: "-0:15"},
+		{name: "hours past the planned end date", d: -(time.Hour + 30*time.Minute), want: "-1:30"},
 	}
 
 	for _, tt := range tests {

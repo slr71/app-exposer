@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cyverse-de/app-exposer/common"
@@ -69,6 +70,14 @@ type Operator struct {
 	httpClient          HTTPClient          // Client for contacting the vice-proxy sidecar.
 	userSuffix          string              // Domain suffix for usernames (e.g. "@iplantcollaborative.org").
 	localStorageClass   string              // StorageClass for the per-analysis working-dir PVC; empty means cluster default.
+
+	// saveAndExitInFlight holds the analysis ids whose save-and-exit is still
+	// running. Save-and-exit uploads outputs and then deletes the analysis's
+	// resources, so a second concurrent run would tear the Deployment down
+	// while the first is still streaming files to iRODS. Duplicate requests are
+	// routine: the expiration worker re-sends one on every sweep, from every
+	// replica, until the analysis leaves the cluster.
+	saveAndExitInFlight sync.Map
 
 	// Construction config for the operator-side VICESpec build path. These are
 	// the cluster values vicebuild needs that the legacy transform path didn't

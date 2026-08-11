@@ -41,10 +41,19 @@ func endTimeFormats(plannedEnd time.Time) (local, utc string) {
 }
 
 // shortDuration renders d as H:MM, the format the DE's analysis emails use for
-// both elapsed and remaining time.
+// both elapsed and remaining time. The sign is pulled out first: Go's integer
+// division truncates toward zero, so formatting a negative duration
+// component-wise would give each part its own sign ("0:-15"). Negative
+// durations are routine here — the termination notice reports the time
+// remaining on an analysis that is already past its planned end date.
 func shortDuration(d time.Duration) string {
 	d = d.Round(time.Minute)
-	hours := d / time.Hour
-	d -= hours * time.Hour
-	return fmt.Sprintf("%d:%02d", hours, d/time.Minute)
+
+	sign := ""
+	if d < 0 {
+		sign = "-"
+		d = -d
+	}
+
+	return fmt.Sprintf("%s%d:%02d", sign, d/time.Hour, (d%time.Hour)/time.Minute)
 }

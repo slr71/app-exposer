@@ -210,10 +210,15 @@ func (d *Database) SetWarningFailureCount(ctx context.Context, tx *sqlx.Tx, kind
 	return err
 }
 
-// SetLastPeriodicWarning records when the most recent periodic reminder went
-// out, which is what paces the next one.
-func (d *Database) SetLastPeriodicWarning(ctx context.Context, tx *sqlx.Tx, analysisID constants.AnalysisID, sentAt time.Time) error {
-	const stmt = `UPDATE notif_statuses SET last_periodic_warning = $2 WHERE analysis_id = $1`
-	_, err := tx.ExecContext(ctx, stmt, analysisID, sentAt)
+// SetLastPeriodicWarning records that a periodic reminder has just gone out,
+// which is what paces the next one.
+//
+// The time comes from the database rather than from Go: last_periodic_warning
+// is a naive `timestamp` holding local wall-clock time, so a Go instant written
+// into it lands shifted by the difference between the process's zone and the
+// database's, throwing off every comparison that paces the reminders.
+func (d *Database) SetLastPeriodicWarning(ctx context.Context, tx *sqlx.Tx, analysisID constants.AnalysisID) error {
+	const stmt = `UPDATE notif_statuses SET last_periodic_warning = now()::timestamp WHERE analysis_id = $1`
+	_, err := tx.ExecContext(ctx, stmt, analysisID)
 	return err
 }

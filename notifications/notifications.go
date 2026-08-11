@@ -218,11 +218,21 @@ func (n *Notifier) send(ctx context.Context, analysis *db.Analysis, status, subj
 	}
 
 	if email {
+		// A failed lookup downgrades the notification to in-app only rather
+		// than dropping it: the DE UI notification is how the user learns their
+		// analysis is ending, and losing that because an address could not be
+		// resolved is worse than losing the email.
 		subj, err := n.subjects.GetSubject(ctx, analysis.Username)
 		if err != nil {
-			return fmt.Errorf("resolving email address for %s: %w", analysis.Username, err)
+			log.Errorf(
+				"resolving the email address for %s; sending the notification for analysis %s without email. "+
+					"This usually means iplant-groups is unreachable or has no subject for the user: %v",
+				analysis.Username, analysis.ID, err,
+			)
+			email = false
+		} else {
+			payload.Email = subj.Email
 		}
-		payload.Email = subj.Email
 	}
 
 	notification := &Notification{

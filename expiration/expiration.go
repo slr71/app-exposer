@@ -139,10 +139,39 @@ func (w *Worker) sweep(ctx context.Context) {
 		}
 	}()
 
+	w.repairRuntime(ctx)
 	w.warnExpiring(ctx, w.expiryWarning, db.HourWarning)
 	w.warnExpiring(ctx, DayExpiryWarning, db.DayWarning)
 	w.remindStillRunning(ctx)
 	w.terminateExpired(ctx)
+}
+
+// repairRuntime fills in the subdomain and planned end date of any running VICE
+// analysis that is missing them. It runs first so an analysis repaired this
+// sweep is a candidate for the passes that follow.
+//
+// The AMQP consumer in this package does the same repair as job status updates
+// arrive, but it only exists when amqp.uri is configured. This pass is the one
+// that is always present: without it, an analysis whose launch-time write
+// failed would be unroutable and would never expire, with nothing to notice.
+func (w *Worker) repairRuntime(ctx context.Context) {
+	analyses, err := w.db.ListAnalysesMissingRuntime(ctx)
+	if err != nil {
+		log.Errorf("listing analyses missing a subdomain or planned end date: %v", err)
+		return
+	}
+
+	for i := range analyses {
+		analysis := &analyses[i]
+		if analysis.ExternalID == "" {
+			// No job_steps row yet, so there is no external ID to derive the
+			// subdomain from. The next sweep picks it up.
+			continue
+		}
+		initializeRuntime(ctx, w.db, analysis, analysis.ExternalID, log.WithFields(logrus.Fields{
+			"analysisID": analysis.ID,
+		}))
+	}
 }
 
 // warnExpiring warns the owners of analyses expiring inside the given window.
@@ -188,7 +217,7 @@ func (w *Worker) remindStillRunning(ctx context.Context) {
 				// harmless and the reminder period paces the retries.
 				return err
 			}
-			return w.db.SetLastPeriodicWarning(ctx, tx, analysis.ID, time.Now())
+			return w.db.SetLastPeriodicWarning(ctx, tx, analysis.ID)
 		})
 		w.logClaimResult(analysis, "periodic reminder", claimErr)
 	}

@@ -25,6 +25,10 @@ type ExpirationDB interface {
 	// periodic reminder is older than their configured reminder period.
 	ListAnalysesDueForPeriodicReminder(ctx context.Context) ([]Analysis, error)
 
+	// ListAnalysesMissingRuntime returns the running VICE analyses that have no
+	// subdomain or no planned end date.
+	ListAnalysesMissingRuntime(ctx context.Context) ([]Analysis, error)
+
 	// GetAnalysisByExternalID returns the analysis owning an external ID, or
 	// sql.ErrNoRows when there is none.
 	GetAnalysisByExternalID(ctx context.Context, externalID constants.ExternalID) (*Analysis, error)
@@ -50,8 +54,8 @@ type ExpirationDB interface {
 	// SetWarningFailureCount records the failed-attempt count for a notification.
 	SetWarningFailureCount(ctx context.Context, tx *sqlx.Tx, kind WarningKind, analysisID constants.AnalysisID, count int) error
 
-	// SetLastPeriodicWarning records when the last periodic reminder was sent.
-	SetLastPeriodicWarning(ctx context.Context, tx *sqlx.Tx, analysisID constants.AnalysisID, sentAt time.Time) error
+	// SetLastPeriodicWarning records that a periodic reminder has just been sent.
+	SetLastPeriodicWarning(ctx context.Context, tx *sqlx.Tx, analysisID constants.AnalysisID) error
 }
 
 // ReconcilerDB is the narrow subset of *Database operations used by the

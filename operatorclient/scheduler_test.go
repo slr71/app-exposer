@@ -755,3 +755,15 @@ func TestSchedulerSyncAndSetTokenSource(t *testing.T) {
 	// After concurrent churn the scheduler must still be operational.
 	assert.NotNil(t, scheduler.Clients(), "scheduler should still have clients after concurrent Sync/SetTokenSource")
 }
+
+// TestFindAnalysisWithNoOperators pins an empty scheduler as an indeterminate
+// answer rather than a miss. Callers read a nil client with a nil error as
+// "genuinely not running anywhere" — for the expiration worker that means
+// marking the analysis Completed, which must not happen on the strength of an
+// answer no operator was ever asked for.
+func TestFindAnalysisWithNoOperators(t *testing.T) {
+	client, err := NewScheduler(nil).FindAnalysis(context.Background(), "analysis-1")
+
+	assert.Nil(t, client)
+	assert.ErrorIs(t, err, ErrNoOperators)
+}
