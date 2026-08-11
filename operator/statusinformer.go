@@ -244,9 +244,9 @@ func (s *StatusInformer) handleAddOrUpdate(ctx context.Context, dep *appsv1.Depl
 	s.publishIfChanged(ctx, constants.ExternalID(externalID), messaging.RunningState, message)
 }
 
-// handleDelete publishes a Succeeded update when a Deployment is removed.
-// Mirrors vice-status-listener's assumption that deletion implies a clean
-// finish. Known gap: a crashed pod (replicas 1 → 0) generates no event here
+// handleDelete publishes a Succeeded update when a Deployment is removed, on
+// the assumption that deletion implies a clean finish. Known gap: a crashed
+// pod (replicas 1 → 0) generates no event here
 // because handleAddOrUpdate skips on AvailableReplicas < 1, so the eventual
 // delete reports Succeeded over what was actually a failure. The reconciler
 // safety net catches this only if it observes the Failed pod phase before

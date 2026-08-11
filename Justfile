@@ -112,6 +112,9 @@ test-operator:
 test-operatorclient:
     go test ./operatorclient/...
 
+test-reconciler:
+    go test ./reconciler/...
+
 test-app-exposer:
     go test ./cmd/app-exposer/...
 
@@ -139,7 +142,7 @@ test-vice-bundle:
 test-vice-userid:
     go test ./cmd/vice-userid/...
 
-test: test-imageinfo test-common test-db test-expiration test-iplantgroups test-notifications test-operator test-operatorclient test-app-exposer test-vice-operator test-vice-operator-tool test-vice-export test-vice-import test-vice-launch test-vice-list test-vice-bundle test-vice-userid
+test: test-imageinfo test-common test-db test-expiration test-iplantgroups test-notifications test-operator test-operatorclient test-reconciler test-app-exposer test-vice-operator test-vice-operator-tool test-vice-export test-vice-import test-vice-launch test-vice-list test-vice-bundle test-vice-userid
 
 fmt-docs:
     swag fmt -g app.go -d cmd/app-exposer/,httphandlers/,common/,incluster/

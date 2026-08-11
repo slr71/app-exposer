@@ -67,7 +67,11 @@ When a new leader takes over, its informer's `AddFunc` fires for every existing 
 
 ### vice-status-listener retirement
 
-The new operator-internal informer covers the local cluster too, so `vice-status-listener` becomes redundant. Recommend deleting it in a follow-up PR after the new path has been running in QA for a week. Out of scope for this change.
+**Done, 2026-08-11.** The new operator-internal informer covers the local cluster too, so `vice-status-listener` became redundant and has been retired. `operator/statusinformer.go` is now the only per-cluster status publisher; the standalone service, its deployments role, and its GitHub repo are gone.
+
+The soak ran far longer than the week originally recommended — the informer went live in QA on 2026-05-18 and both publishers ran side by side for ~3 months. During that window the listener emitted 4-5 duplicate `Running` updates per analysis (one per Deployment update event) against the informer's one, and the remote `ai-sandboxes-qa` operator — which never had a listener — demonstrated the push path standing on its own.
+
+One deliberate behavior change came with the retirement: the listener published `Running` the instant the Deployment object appeared, while the informer waits for `AvailableReplicas >= 1`. Analyses now stay in `Submitted` through image pull and report `Running` when the pod is actually ready.
 
 ## Files
 
@@ -112,5 +116,4 @@ Tests to add:
 ## Open questions (decide before implementation)
 
 - **Cluster identifier in payload** — `vice-status-listener`'s current body is `{Host, State, Message}` with `Host` being the deployment hostname. We could put the cluster name there for the new path, or extend the body. Recommend keeping body identical to vice-status-listener for now and adding a cluster field with the auth follow-up.
-- **vice-status-listener retirement timeline** — once the new path has soaked in QA, vice-status-listener becomes pure duplication and should be deleted. Worth pinning a date.
 - **Auth follow-up scope** — token/role/dedup all land together in a separate PR. Note in the implementation that the publisher's HTTP client is positioned to drop in a token-injecting transport later without restructuring.
