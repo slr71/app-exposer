@@ -1,3 +1,9 @@
+amqp:
+  uri: amqp://username:password@host:5672/vhost
+  exchange:
+    name: de
+    type: topic
+
 apps:
   base: "http://localhost:31323"
 
@@ -7,6 +13,10 @@ db:
 interapps:
   proxy:
     tag: latest
+
+iplant_groups:
+  base: "http://iplant-groups"
+  user: de_grouper
 
 irods:
   zone: "cyverse"
@@ -23,6 +33,9 @@ keycloak:
 
 metadata:
   base: "http://metadata"
+
+notification_agent:
+  base: "http://notification-agent"
 
 path_list:
   file_identifier: "# application/vnd.de.multi-input-path-list+csv; version=1"

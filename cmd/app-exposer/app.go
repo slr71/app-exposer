@@ -71,10 +71,7 @@ type ExposerAppInit struct {
 //
 // NewExposerApp creates and returns a newly instantiated *ExposerApp.
 func NewExposerApp(init *ExposerAppInit, apps *apps.Apps, c *koanf.Koanf) *ExposerApp {
-	jobStatusURL := c.String("vice.job-status.base")
-	if jobStatusURL == "" {
-		jobStatusURL = "http://job-status-listener"
-	}
+	jobStatusURL := jobStatusBase(c)
 
 	metadataBaseURL := c.String("metadata.base")
 	if metadataBaseURL == "" {

@@ -17,7 +17,9 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // rewriteTransport redirects every outbound request to target, preserving
@@ -439,4 +441,54 @@ func TestHandleSaveOutputFiles(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSaveAndExitIsDeduplicated covers the guard against concurrent
+// save-and-exit runs for one analysis. Save-and-exit uploads outputs and then
+// deletes the analysis's resources, so a second run would tear the Deployment
+// down while the first is still streaming files to iRODS. Duplicates are
+// routine: the expiration worker re-sends the request on every sweep, from
+// every replica, until the analysis leaves the cluster.
+func TestSaveAndExitIsDeduplicated(t *testing.T) {
+	const analysisID = "save-and-exit-dedupe"
+
+	newOperator := func(t *testing.T) (*Operator, *atomic.Bool) {
+		t.Helper()
+
+		op, clientset, _ := newTestOperator(t, 10)
+
+		// Listing the analysis's Services is the first thing the background
+		// goroutine does, so it stands in for "the transfer started".
+		var started atomic.Bool
+		clientset.PrependReactor("list", "services", func(k8stesting.Action) (bool, runtime.Object, error) {
+			started.Store(true)
+			return false, nil, nil
+		})
+
+		return op, &started
+	}
+
+	t.Run("a first request starts the transfer", func(t *testing.T) {
+		op, started := newOperator(t)
+
+		c, rec := newTransferContext(echo.New(), analysisID)
+		require.NoError(t, op.HandleSaveAndExit(c))
+		assert.Equal(t, http.StatusAccepted, rec.Code)
+
+		assert.Eventually(t, started.Load, time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("a request for an analysis already saving is dropped", func(t *testing.T) {
+		op, started := newOperator(t)
+		op.saveAndExitInFlight.Store(analysisID, struct{}{})
+
+		c, rec := newTransferContext(echo.New(), analysisID)
+		require.NoError(t, op.HandleSaveAndExit(c))
+
+		// Still accepted: the caller asked for a state the operator is already
+		// working toward, which is not an error.
+		assert.Equal(t, http.StatusAccepted, rec.Code)
+		assert.Never(t, started.Load, 200*time.Millisecond, 10*time.Millisecond,
+			"a duplicate request must not start a second upload")
+	})
 }

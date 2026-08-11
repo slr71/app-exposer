@@ -86,6 +86,45 @@ For configuration, use `example-config.yml` as a reference. You'll need to eithe
 
 Disables authentication in the vice-proxy sidecar containers for VICE applications. When set to `true`, the `--disable-auth` flag is passed to vice-proxy, allowing unauthenticated access to VICE applications. This is intended for development, testing, or scenarios where authentication is handled elsewhere. In production environments, this should remain `false` (the default) to enforce authentication via Keycloak.
 
+### Analysis Expiration
+
+`--expiration-sweep-interval` (default: `10s`)
+
+How often the background worker checks running analyses for expiry warnings and
+terminations. This bounds how late either can be.
+
+`--expiry-warning` (default: `1h`)
+
+How far ahead of an analysis's planned end date to send the short-notice expiry
+warning. The day-ahead warning is fixed at 24h.
+
+## Analysis expiration and notifications
+
+app-exposer enforces the time limits on VICE analyses. A background worker
+(`expiration/`) sweeps the running analyses and:
+
+- warns the owner a day and an hour before the analysis's planned end date,
+- sends a periodic "still running" reminder (default every 4h, overridable per
+  analysis via the submission's `periodic_period`),
+- asks the owning operator to save outputs and exit once the planned end date
+  passes, then tells the owner it was terminated,
+- marks an expired analysis `Completed` if it is no longer running in any
+  cluster.
+
+This work was previously the standalone `timelord` service. It needs
+`notification_agent.base`, `iplant_groups.base`, `iplant_groups.user`, and
+`amqp.*` in the config file.
+
+The worker runs in every app-exposer replica. Each notification is sent exactly
+once by claiming the analysis's `notif_statuses` row with `FOR UPDATE SKIP
+LOCKED`, so replicas never duplicate a user's email.
+
+The VICE launch handler is the canonical writer of `jobs.subdomain` and
+`jobs.planned_end_date`. The worker's AMQP consumer watches `jobs.updates` and
+backfills those columns for any interactive analysis that reaches `Running`
+without them, logging at warn level whenever it has to — in steady state it
+should never fire.
+
 ## Regenerating the Swagger docs
 
 Both `app-exposer` and `vice-operator` ship Swagger 2.0 docs generated from godoc-style annotations on the handler source. The generators are invoked via the Justfile so the source-file list and any non-default `swag` flags stay in one place:
