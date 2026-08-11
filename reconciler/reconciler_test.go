@@ -215,9 +215,9 @@ func TestReconcileAnalysis(t *testing.T) {
 		},
 		{
 			// Bootstraps the job_status_updates row from the cluster state
-			// when nothing else has published one — the only way analyses
-			// on remote-cluster operators (e.g. AWS, where
-			// vice-status-listener isn't running) ever leave Submitted.
+			// when nothing else has published one — the only way an
+			// analysis that never reached an available replica, and so
+			// never triggered the operator's informer, leaves Submitted.
 			name: "seeds initial status when no prior row exists",
 			pod: reporting.PodInfo{
 				MetaInfo: reporting.MetaInfo{AnalysisID: "an-1", ExternalID: "ext-1"},

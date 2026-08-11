@@ -384,13 +384,14 @@ func (r *Reconciler) reconcileAnalysis(ctx context.Context, tx *sqlx.Tx, pod rep
 	dbStatus, err := r.db.GetLatestStatusByExternalID(ctx, tx, pod.ExternalID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		// No prior status row. Probable cause: the analysis was launched
-		// against a remote-cluster operator (e.g. AWS) where
-		// vice-status-listener isn't running, so nothing else ever
-		// published an initial Submitted/Running update. Seed the table
-		// with the cluster's current state so downstream consumers like
-		// job-status-to-apps-adapter pick it up; subsequent ticks then
-		// fall through to the normal change-detection path.
+		// No prior status row. Probable cause: the analysis never reached
+		// an available replica, so the operator's status informer — which
+		// only publishes once a Deployment reports one — never emitted
+		// anything for it. A bad image tag or a crash on start looks like
+		// this. Seed the table with the cluster's current state so
+		// downstream consumers like job-status-to-apps-adapter pick it up;
+		// subsequent ticks then fall through to the normal
+		// change-detection path.
 		log.Infof("analysis %s (external %s) has no prior status; recording initial %s from cluster",
 			pod.AnalysisID, pod.ExternalID, clusterStatus)
 		return r.recordStatusUpdate(ctx, tx, pod.ExternalID, clusterStatus, pod.Message)
