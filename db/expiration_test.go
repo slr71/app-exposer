@@ -31,7 +31,7 @@ const initialRuntimeSQL = `
 		UPDATE ONLY jobs
 		   SET planned_end_date = COALESCE(
 		           planned_end_date,
-		           COALESCE(start_date, now()::timestamp) + make_interval(secs => $3)
+		           COALESCE(start_date, $4::timestamp) + make_interval(secs => $3)
 		       ),
 		       subdomain = COALESCE(NULLIF(subdomain, ''), $2)
 		 WHERE id = $1
@@ -85,7 +85,7 @@ func TestSetInitialRuntime(t *testing.T) {
 			database, mock := newTestDB(t)
 
 			expectation := mock.ExpectExec(initialRuntimeSQL).
-				WithArgs(testAnalysisID, "a1b2c3d4e", int64(3600))
+				WithArgs(testAnalysisID, "a1b2c3d4e", int64(3600), sqlmock.AnyArg())
 			if tt.execErr != nil {
 				expectation.WillReturnError(tt.execErr)
 			} else {
@@ -122,7 +122,7 @@ func TestInitializeRuntimeUsesTheSharedSubdomain(t *testing.T) {
 		WithArgs(testAnalysisID, DefaultToolTimeLimitSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(int64(259200)))
 	mock.ExpectExec(initialRuntimeSQL).
-		WithArgs(testAnalysisID, wantSubdomain, int64(259200)).
+		WithArgs(testAnalysisID, wantSubdomain, int64(259200), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	changed, err := database.InitializeRuntime(context.Background(), testAnalysisID, userID, externalID)
@@ -165,8 +165,8 @@ func newRegexpTestDB(t *testing.T) (*Database, sqlmock.Sqlmock) {
 func TestListAnalysesDueForPeriodicReminderPacesFromTheLastReminder(t *testing.T) {
 	database, mock := newRegexpTestDB(t)
 
-	mock.ExpectQuery(`GREATEST\(jobs\.start_date, notif_statuses\.last_periodic_warning\)\s+<\s+now\(\) - COALESCE\(notif_statuses\.periodic_warning_period`).
-		WithArgs(runningStatus).
+	mock.ExpectQuery(`GREATEST\(jobs\.start_date, notif_statuses\.last_periodic_warning\)\s+<\s+\$2::timestamp - COALESCE\(notif_statuses\.periodic_warning_period`).
+		WithArgs(runningStatus, sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	analyses, err := database.ListAnalysesDueForPeriodicReminder(context.Background())

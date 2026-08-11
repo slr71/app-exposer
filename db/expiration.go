@@ -13,11 +13,9 @@ import (
 // has reached its time limit and to describe it in a user notification.
 //
 // StartDate and PlannedEndDate are nullable: an analysis that has not started,
-// or whose planned end date has not been set yet, leaves them nil. Both are
-// selected through AT TIME ZONE current_setting('TimeZone') so the naive
-// `timestamp` columns arrive as the absolute instants they were written as —
-// the columns hold local wall-clock time, so reading them without the
-// conversion would silently shift every duration by the local UTC offset.
+// or whose planned end date has not been set yet, leaves them nil. Both come
+// from naive `timestamp` columns and are only correct instants once
+// localizeTimestamps has run — see db/timestamps.go.
 type Analysis struct {
 	ID             constants.AnalysisID `db:"id"`
 	AppID          string               `db:"app_id"`
@@ -50,8 +48,8 @@ const analysisColumns = `
 	       jobs.job_description,
 	       jobs.job_name,
 	       jobs.result_folder_path,
-	       jobs.start_date AT TIME ZONE current_setting('TimeZone') AS start_date,
-	       jobs.planned_end_date AT TIME ZONE current_setting('TimeZone') AS planned_end_date,
+	       jobs.start_date,
+	       jobs.planned_end_date,
 	       COALESCE(jobs.subdomain, '') AS subdomain,
 	       job_types.system_id,
 	       users.username,
@@ -71,30 +69,80 @@ const analysisColumns = `
 // running analyses are candidates for expiry warnings or termination.
 const runningStatus = "Running"
 
+// localizeTimestamps relabels the analysis's naive timestamps into the zone the
+// DE wrote them in, which is what makes every duration derived from them — the
+// termination grace period, the reminder pacing, the times in the notification
+// emails — measure the interval the user actually sees.
+func (a *Analysis) localizeTimestamps() {
+	a.StartDate = inLocalZone(a.StartDate)
+	a.PlannedEndDate = inLocalZone(a.PlannedEndDate)
+}
+
+// selectAnalyses runs one of the analysisColumns queries. Every multi-row
+// Analysis query goes through it so that none can return timestamps that have
+// not been relabeled.
+func (d *Database) selectAnalyses(ctx context.Context, query string, args ...any) ([]Analysis, error) {
+	analyses := []Analysis{}
+	if err := d.db.SelectContext(ctx, &analyses, query, args...); err != nil {
+		return nil, err
+	}
+
+	for i := range analyses {
+		analyses[i].localizeTimestamps()
+	}
+
+	return analyses, nil
+}
+
+// The statements that compare or write one of the naive timestamp columns are
+// package-level so the contract in db/timestamps.go can be asserted against them
+// directly — the bug they guard against is invisible at the Go type level and
+// only shows up as analyses terminating hours early.
+const (
+	expiredAnalysesQuery = analysisColumns + `
+		 WHERE jobs.status = $1
+		   AND jobs.planned_end_date <= $2::timestamp
+	`
+
+	expiringWithinQuery = analysisColumns + `
+		 WHERE jobs.status = $1
+		   AND jobs.planned_end_date > $2::timestamp
+		   AND jobs.planned_end_date <= $3::timestamp
+	`
+
+	periodicReminderQuery = analysisColumns + `
+		  LEFT JOIN notif_statuses ON jobs.id = notif_statuses.analysis_id
+		 WHERE jobs.status = $1
+		   AND jobs.start_date IS NOT NULL
+		   AND jobs.planned_end_date > $2::timestamp
+		   AND GREATEST(jobs.start_date, notif_statuses.last_periodic_warning) <
+		       $2::timestamp - COALESCE(notif_statuses.periodic_warning_period, '4 hours'::interval)
+	`
+
+	initialRuntimeStmt = `
+		UPDATE ONLY jobs
+		   SET planned_end_date = COALESCE(
+		           planned_end_date,
+		           COALESCE(start_date, $4::timestamp) + make_interval(secs => $3)
+		       ),
+		       subdomain = COALESCE(NULLIF(subdomain, ''), $2)
+		 WHERE id = $1
+		   AND (planned_end_date IS NULL OR subdomain IS NULL OR subdomain = '')
+	`
+)
+
 // ListExpiredAnalyses returns the running analyses whose planned end date has
 // passed and which are therefore due for termination.
 func (d *Database) ListExpiredAnalyses(ctx context.Context) ([]Analysis, error) {
-	const query = analysisColumns + `
-		 WHERE jobs.status = $1
-		   AND jobs.planned_end_date <= now()
-	`
-	analyses := []Analysis{}
-	err := d.db.SelectContext(ctx, &analyses, query, runningStatus)
-	return analyses, err
+	return d.selectAnalyses(ctx, expiredAnalysesQuery, runningStatus, time.Now())
 }
 
 // ListAnalysesExpiringWithin returns the running analyses whose planned end
 // date falls between now and the given window — the candidates for an advance
 // "your analysis will terminate" warning.
 func (d *Database) ListAnalysesExpiringWithin(ctx context.Context, window time.Duration) ([]Analysis, error) {
-	const query = analysisColumns + `
-		 WHERE jobs.status = $1
-		   AND jobs.planned_end_date > now()
-		   AND jobs.planned_end_date <= now() + make_interval(secs => $2)
-	`
-	analyses := []Analysis{}
-	err := d.db.SelectContext(ctx, &analyses, query, runningStatus, window.Seconds())
-	return analyses, err
+	now := time.Now()
+	return d.selectAnalyses(ctx, expiringWithinQuery, runningStatus, now, now.Add(window))
 }
 
 // ListAnalysesDueForPeriodicReminder returns the running analyses that have not
@@ -108,17 +156,7 @@ func (d *Database) ListAnalysesExpiringWithin(ctx context.Context, window time.D
 // records nothing to stop it happening again ten seconds later. GREATEST
 // ignores NULLs in Postgres, so it doubles as the has-no-reminder-yet case.
 func (d *Database) ListAnalysesDueForPeriodicReminder(ctx context.Context) ([]Analysis, error) {
-	const query = analysisColumns + `
-		  LEFT JOIN notif_statuses ON jobs.id = notif_statuses.analysis_id
-		 WHERE jobs.status = $1
-		   AND jobs.start_date IS NOT NULL
-		   AND jobs.planned_end_date > now()
-		   AND GREATEST(jobs.start_date, notif_statuses.last_periodic_warning) <
-		       now() - COALESCE(notif_statuses.periodic_warning_period, '4 hours'::interval)
-	`
-	analyses := []Analysis{}
-	err := d.db.SelectContext(ctx, &analyses, query, runningStatus)
-	return analyses, err
+	return d.selectAnalyses(ctx, periodicReminderQuery, runningStatus, time.Now())
 }
 
 // interactiveAnalysis is the predicate identifying an analysis with a VICE
@@ -147,9 +185,7 @@ func (d *Database) ListAnalysesMissingRuntime(ctx context.Context) ([]Analysis, 
 		 WHERE jobs.status = $1
 		   AND (jobs.planned_end_date IS NULL OR COALESCE(jobs.subdomain, '') = '')
 		   AND ` + interactiveAnalysis
-	analyses := []Analysis{}
-	err := d.db.SelectContext(ctx, &analyses, query, runningStatus)
-	return analyses, err
+	return d.selectAnalyses(ctx, query, runningStatus)
 }
 
 // GetAnalysisByExternalID returns the analysis owning the given external ID, or
@@ -165,6 +201,7 @@ func (d *Database) GetAnalysisByExternalID(ctx context.Context, externalID const
 	if err := d.db.GetContext(ctx, &analysis, query, externalID); err != nil {
 		return nil, err
 	}
+	analysis.localizeTimestamps()
 	return &analysis, nil
 }
 
@@ -220,17 +257,7 @@ func (d *Database) GetTimeLimitSeconds(ctx context.Context, analysisID constants
 // granted. Returns whether the statement changed anything, so callers can log
 // when the launch-time write had to be backfilled later.
 func (d *Database) SetInitialRuntime(ctx context.Context, analysisID constants.AnalysisID, subdomain string, timeLimitSeconds int64) (bool, error) {
-	const stmt = `
-		UPDATE ONLY jobs
-		   SET planned_end_date = COALESCE(
-		           planned_end_date,
-		           COALESCE(start_date, now()::timestamp) + make_interval(secs => $3)
-		       ),
-		       subdomain = COALESCE(NULLIF(subdomain, ''), $2)
-		 WHERE id = $1
-		   AND (planned_end_date IS NULL OR subdomain IS NULL OR subdomain = '')
-	`
-	result, err := d.db.ExecContext(ctx, stmt, analysisID, subdomain, timeLimitSeconds)
+	result, err := d.db.ExecContext(ctx, initialRuntimeStmt, analysisID, subdomain, timeLimitSeconds, time.Now())
 	if err != nil {
 		return false, err
 	}

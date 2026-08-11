@@ -27,7 +27,7 @@ const claimSQL = `
 		       day_warning_failure_count,
 		       kill_warning_sent,
 		       kill_warning_failure_count,
-		       last_periodic_warning AT TIME ZONE current_setting('TimeZone') AS last_periodic_warning,
+		       last_periodic_warning,
 		       COALESCE(EXTRACT(EPOCH FROM periodic_warning_period), 0)::bigint AS periodic_warning_seconds
 		  FROM notif_statuses
 		 WHERE analysis_id = $1
@@ -246,11 +246,11 @@ func TestWarningStatementsRejectAnUnknownKind(t *testing.T) {
 func TestSetLastPeriodicWarning(t *testing.T) {
 	database, mock := newTestDB(t)
 
-	// The timestamp comes from the database, not from Go: the column is naive
-	// and holds local wall-clock time.
+	// The timestamp comes from Go and is cast to a naive timestamp, which stores
+	// the deployment's wall clock rather than the database session zone's.
 	mock.ExpectBegin()
-	mock.ExpectExec(`UPDATE notif_statuses SET last_periodic_warning = now()::timestamp WHERE analysis_id = $1`).
-		WithArgs(testAnalysisID).
+	mock.ExpectExec(`UPDATE notif_statuses SET last_periodic_warning = $2::timestamp WHERE analysis_id = $1`).
+		WithArgs(testAnalysisID, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 

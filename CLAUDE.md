@@ -120,9 +120,14 @@ Every package does `var log = common.Log`. Caller reporting is on. Level is set 
   consumer only backfills them and logs at warn level when it has to. Always
   derive a subdomain with `common.Subdomain` — a second implementation that
   drifts makes analyses unroutable.
-- **Both timestamps are naive `timestamp` columns holding local wall-clock
-  time.** Read them through `AT TIME ZONE current_setting('TimeZone')`; reading
-  them raw shifts every duration by the local UTC offset.
+- **The analysis timestamps are naive `timestamp` columns holding wall-clock
+  time in the deployment's zone**, which is *not* the database session's zone.
+  Never compare one against `now()` and never convert one with
+  `current_setting('TimeZone')`: both resolve the value in the session zone
+  (usually `Etc/UTC`), which on a US deployment terminates analyses hours early.
+  Pass a Go cutoff cast with `::timestamp` and relabel values read back — see
+  `db/timestamps.go`. `incluster/incluster.go`'s time-limit SQL still has the
+  older, broken form.
 - **The expiration worker runs in every replica.** Anything that must happen once
   per analysis takes the `notif_statuses` row with `FOR UPDATE SKIP LOCKED`
   (`db.ClaimNotifStatuses`) rather than read-then-write.

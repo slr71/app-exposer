@@ -33,10 +33,9 @@ const (
 
 // NotifStatuses records which notifications have already been delivered for an
 // analysis, and how many delivery attempts have failed. LastPeriodicWarning is
-// nil when no periodic reminder has been sent yet, and is read through
-// AT TIME ZONE current_setting('TimeZone') for the same reason as the timestamps
-// on Analysis: the column is naive and holds local wall-clock time, so reading
-// it raw would put every comparison off by the local UTC offset.
+// nil when no periodic reminder has been sent yet, and like the timestamps on
+// Analysis it comes from a naive `timestamp` column, so it is only a correct
+// instant once relabeled — see db/timestamps.go.
 type NotifStatuses struct {
 	AnalysisID              constants.AnalysisID `db:"analysis_id"`
 	ExternalID              constants.ExternalID `db:"external_id"`
@@ -96,6 +95,11 @@ var warningStatements = map[WarningKind]struct{ setSent, setFailureCount string 
 	},
 }
 
+// lastPeriodicWarningStmt is package-level for the same reason as the statements
+// in db/expiration.go: it writes one of the naive timestamp columns, so the
+// contract in db/timestamps.go is asserted against it directly.
+const lastPeriodicWarningStmt = `UPDATE notif_statuses SET last_periodic_warning = $2::timestamp WHERE analysis_id = $1`
+
 // EnsureNotifStatuses creates the analysis's notif_statuses row if it does not
 // exist. periodicPeriodSeconds is the reminder interval requested at launch; a
 // non-positive value stores the DE's four-hour default.
@@ -147,7 +151,7 @@ func (d *Database) ClaimNotifStatuses(ctx context.Context, analysisID constants.
 		       day_warning_failure_count,
 		       kill_warning_sent,
 		       kill_warning_failure_count,
-		       last_periodic_warning AT TIME ZONE current_setting('TimeZone') AS last_periodic_warning,
+		       last_periodic_warning,
 		       COALESCE(EXTRACT(EPOCH FROM periodic_warning_period), 0)::bigint AS periodic_warning_seconds
 		  FROM notif_statuses
 		 WHERE analysis_id = $1
@@ -170,6 +174,8 @@ func (d *Database) ClaimNotifStatuses(ctx context.Context, analysisID constants.
 		}
 		return sql.ErrNoRows
 	}
+
+	statuses.LastPeriodicWarning = inLocalZone(statuses.LastPeriodicWarning)
 
 	if err := fn(tx, &statuses); err != nil {
 		return err
@@ -213,12 +219,12 @@ func (d *Database) SetWarningFailureCount(ctx context.Context, tx *sqlx.Tx, kind
 // SetLastPeriodicWarning records that a periodic reminder has just gone out,
 // which is what paces the next one.
 //
-// The time comes from the database rather than from Go: last_periodic_warning
-// is a naive `timestamp` holding local wall-clock time, so a Go instant written
-// into it lands shifted by the difference between the process's zone and the
-// database's, throwing off every comparison that paces the reminders.
+// The time comes from Go rather than from the database. Postgres drops the
+// offset when it parses the value into the naive column, storing the
+// deployment's wall clock — whereas now()::timestamp would store the wall clock
+// of the database session's zone, which is not the zone anything reads this
+// column back in.
 func (d *Database) SetLastPeriodicWarning(ctx context.Context, tx *sqlx.Tx, analysisID constants.AnalysisID) error {
-	const stmt = `UPDATE notif_statuses SET last_periodic_warning = now()::timestamp WHERE analysis_id = $1`
-	_, err := tx.ExecContext(ctx, stmt, analysisID)
+	_, err := tx.ExecContext(ctx, lastPeriodicWarningStmt, analysisID, time.Now())
 	return err
 }
