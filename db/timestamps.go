@@ -20,11 +20,13 @@ import "time"
 // pass a Go instant and cast the parameter with ::timestamp — never
 // ::timestamptz — so Postgres drops the offset and both sides of the comparison
 // are the deployment's wall clock. Values read back are relabeled by
-// inLocalZone.
+// InLocalZone.
 
-// inLocalZone reinterprets a naive timestamp's wall-clock fields as local time,
-// which is the zone the DE wrote them in.
-func inLocalZone(t *time.Time) *time.Time {
+// InLocalZone reinterprets a naive timestamp's wall-clock fields as local time,
+// which is the zone the DE wrote them in. Exported for the callers outside this
+// package that read one of these columns directly — there is one rule here, and
+// a second implementation of it would drift.
+func InLocalZone(t *time.Time) *time.Time {
 	return inZone(t, time.Local)
 }
 

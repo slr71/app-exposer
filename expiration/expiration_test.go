@@ -30,13 +30,17 @@ type fakeExpirationDB struct {
 
 	interactive bool
 
+	// completedStatusFor records the external IDs already reported Completed.
+	completedStatusFor map[constants.ExternalID]bool
+
 	// Injected errors (nil by default).
-	expiringErr       error
-	expiredErr        error
-	periodicErr       error
-	missingRuntimeErr error
-	ensureErr         error
-	initErr           error
+	expiringErr        error
+	expiredErr         error
+	periodicErr        error
+	missingRuntimeErr  error
+	ensureErr          error
+	initErr            error
+	completedStatusErr error
 
 	// Recorded side effects.
 	ensured        []constants.AnalysisID
@@ -56,6 +60,8 @@ func newFakeDB() *fakeExpirationDB {
 		sentFlags:     map[string]bool{},
 		failureCounts: map[string]int{},
 		lastPeriodic:  map[constants.AnalysisID]time.Time{},
+
+		completedStatusFor: map[constants.ExternalID]bool{},
 	}
 }
 
@@ -89,6 +95,13 @@ func (f *fakeExpirationDB) GetAnalysisByExternalID(_ context.Context, externalID
 
 func (f *fakeExpirationDB) IsInteractive(context.Context, constants.AnalysisID) (bool, error) {
 	return f.interactive, nil
+}
+
+func (f *fakeExpirationDB) HasCompletedStatus(_ context.Context, externalID constants.ExternalID) (bool, error) {
+	if f.completedStatusErr != nil {
+		return false, f.completedStatusErr
+	}
+	return f.completedStatusFor[externalID], nil
 }
 
 func (f *fakeExpirationDB) InitializeRuntime(_ context.Context, analysisID constants.AnalysisID, _, _ string) (bool, error) {
@@ -545,6 +558,82 @@ func TestHandleIndeterminate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMarkCompletedPublishesOnlyOnce covers the guard on the one action in the
+// sweep that is not claim-guarded. An expired analysis that has left every
+// cluster is reconciled by publishing a Completed status, after which the DE
+// transitions it and it stops being returned as expired. When that transition
+// does not happen — a stalled job-status pipeline, a jobs row pinned by someone
+// else's long-running transaction — the analysis stays expired forever, and an
+// unguarded publish becomes one status update per sweep per replica without end.
+func TestMarkCompletedPublishesOnlyOnce(t *testing.T) {
+	const id = constants.AnalysisID("analysis-1")
+
+	tests := []struct {
+		name            string
+		alreadyReported bool
+		lookupErr       error
+		wantPublished   bool
+	}{
+		{
+			name:          "publishes when nothing has been reported yet",
+			wantPublished: true,
+		},
+		{
+			name:            "does not re-publish once a Completed status is recorded",
+			alreadyReported: true,
+		},
+		{
+			name:      "skips the analysis when the check itself fails",
+			lookupErr: errors.New("connection reset"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := newFakeDB()
+			status := &fakeStatusPublisher{}
+			w := New(database, &fakeNotifier{}, nil, status, Init{})
+
+			analysis := testAnalysis(id)
+			database.completedStatusFor[analysis.ExternalID] = tt.alreadyReported
+			database.completedStatusErr = tt.lookupErr
+
+			w.markCompleted(context.Background(), &analysis)
+
+			if tt.wantPublished {
+				assert.Equal(t, []string{string(analysis.ExternalID)}, status.succeeded)
+			} else {
+				assert.Empty(t, status.succeeded)
+			}
+		})
+	}
+}
+
+// TestMarkCompletedStopsRepublishingAcrossSweeps is the regression the guard
+// exists for: a durable record is what makes repeated sweeps converge, so this
+// asserts the behavior over several passes rather than a single call.
+func TestMarkCompletedStopsRepublishingAcrossSweeps(t *testing.T) {
+	const id = constants.AnalysisID("analysis-1")
+
+	database := newFakeDB()
+	status := &fakeStatusPublisher{}
+	w := New(database, &fakeNotifier{}, nil, status, Init{})
+
+	analysis := testAnalysis(id)
+
+	for range 5 {
+		w.markCompleted(context.Background(), &analysis)
+		// Stands in for the status update the publish records, which is what a
+		// later sweep — on this replica or any other — reads back.
+		if len(status.succeeded) > 0 {
+			database.completedStatusFor[analysis.ExternalID] = true
+		}
+	}
+
+	assert.Equal(t, []string{string(analysis.ExternalID)}, status.succeeded,
+		"five sweeps of the same stuck analysis must publish exactly one status update")
 }
 
 // TestRepairRuntime covers the sweep-driven repair of the runtime fields. It is

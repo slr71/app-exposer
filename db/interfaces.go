@@ -36,6 +36,10 @@ type ExpirationDB interface {
 	// IsInteractive reports whether the analysis has a VICE step.
 	IsInteractive(ctx context.Context, analysisID constants.AnalysisID) (bool, error)
 
+	// HasCompletedStatus reports whether a Completed status has already been
+	// recorded for the given external ID.
+	HasCompletedStatus(ctx context.Context, externalID constants.ExternalID) (bool, error)
+
 	// InitializeRuntime fills in the analysis's subdomain and planned end date
 	// when they are not already set, reporting whether it changed anything.
 	InitializeRuntime(ctx context.Context, analysisID constants.AnalysisID, userID, externalID string) (bool, error)

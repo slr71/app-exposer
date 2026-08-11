@@ -57,7 +57,7 @@ func TestInZonePreservesTheWallClock(t *testing.T) {
 
 func TestInZonePassesNilThrough(t *testing.T) {
 	assert.Nil(t, inZone(nil, time.UTC))
-	assert.Nil(t, inLocalZone(nil))
+	assert.Nil(t, InLocalZone(nil))
 }
 
 // TestNaiveTimestampsAreNeverComparedAgainstNow is a regression guard on the bug

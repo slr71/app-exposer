@@ -125,9 +125,13 @@ Every package does `var log = common.Log`. Caller reporting is on. Level is set 
   Never compare one against `now()` and never convert one with
   `current_setting('TimeZone')`: both resolve the value in the session zone
   (usually `Etc/UTC`), which on a US deployment terminates analyses hours early.
-  Pass a Go cutoff cast with `::timestamp` and relabel values read back — see
-  `db/timestamps.go`. `incluster/incluster.go`'s time-limit SQL still has the
-  older, broken form.
+  Pass a Go cutoff cast with `::timestamp` and relabel values read back with
+  `db.InLocalZone` — see `db/timestamps.go`. That helper is the one canonical
+  rule; don't write a second conversion.
+- **The expiration sweep's one unguarded action was `markCompleted`.** It now
+  checks `db.HasCompletedStatus` first, because the analysis only stops being
+  returned as expired once the DE acts on that status — and when the DE doesn't,
+  an unguarded publish is unbounded.
 - **The expiration worker runs in every replica.** Anything that must happen once
   per analysis takes the `notif_statuses` row with `FOR UPDATE SKIP LOCKED`
   (`db.ClaimNotifStatuses`) rather than read-then-write.

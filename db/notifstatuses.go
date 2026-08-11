@@ -175,7 +175,7 @@ func (d *Database) ClaimNotifStatuses(ctx context.Context, analysisID constants.
 		return sql.ErrNoRows
 	}
 
-	statuses.LastPeriodicWarning = inLocalZone(statuses.LastPeriodicWarning)
+	statuses.LastPeriodicWarning = InLocalZone(statuses.LastPeriodicWarning)
 
 	if err := fn(tx, &statuses); err != nil {
 		return err

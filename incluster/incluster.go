@@ -8,11 +8,13 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/apd"
 	"github.com/cyverse-de/app-exposer/apps"
 	"github.com/cyverse-de/app-exposer/common"
 	"github.com/cyverse-de/app-exposer/constants"
+	"github.com/cyverse-de/app-exposer/db"
 	"github.com/cyverse-de/app-exposer/incluster/jobinfo"
 	"github.com/cyverse-de/app-exposer/operatorclient"
 	"github.com/cyverse-de/app-exposer/quota"
@@ -197,21 +199,24 @@ func GetMillicoresFromDeployment(deployment *appsv1.Deployment) (*apd.Decimal, e
 	return millicores, nil
 }
 
+// Both statements return planned_end_date as stored rather than converting it to
+// an epoch in SQL. The column is naive and holds wall-clock time in the
+// deployment's zone, so any conversion has to name that zone; doing it with
+// current_setting('TimeZone') used the database session's zone instead and
+// returned an epoch off by the difference between the two — seven hours on a US
+// deployment against a UTC database. plannedEndEpoch converts it correctly.
+
 const updateTimeLimitSQL = `
 	UPDATE ONLY jobs
 	   SET planned_end_date = old_value.planned_end_date + interval '1 second' * $3
 	  FROM (SELECT planned_end_date FROM jobs WHERE id = $2) AS old_value
 	 WHERE jobs.id = $2
 	   AND jobs.user_id = $1
- RETURNING EXTRACT(EPOCH FROM
-    jobs.planned_end_date AT TIME ZONE current_setting('TimeZone')
- )::bigint
+ RETURNING jobs.planned_end_date
 `
 
 const getTimeLimitSQL = `
-	SELECT EXTRACT(EPOCH FROM
-	    planned_end_date AT TIME ZONE current_setting('TimeZone')
-	)::bigint
+	SELECT planned_end_date
 	  FROM jobs
 	 WHERE jobs.id = $2
 	   AND jobs.user_id = $1
@@ -229,19 +234,34 @@ type TimeLimit struct {
 	TimeLimit string `json:"time_limit"`
 }
 
+// plannedEndEpoch converts a planned end date read from the naive jobs column
+// into a Unix epoch, reporting false when the column is NULL. The relabeling is
+// shared with the expiration worker so the two cannot disagree about what these
+// timestamps mean — see db/timestamps.go.
+//
+// Rounded rather than truncated because the column carries fractional seconds
+// and the EXTRACT(EPOCH ...)::bigint this replaced rounded them. The zone was the
+// bug; the second this API reports should not move with the fix.
+func plannedEndEpoch(plannedEnd sql.NullTime) (int64, bool) {
+	if !plannedEnd.Valid {
+		return 0, false
+	}
+	return db.InLocalZone(&plannedEnd.Time).Round(time.Second).Unix(), true
+}
+
 // GetTimeLimit returns the planned end date (as a Unix epoch string) for the
 // analysis with the given ID, run by the given user.
 func (i *Incluster) GetTimeLimit(ctx context.Context, userID string, id constants.AnalysisID) (*TimeLimit, error) {
 	var err error
 
-	var epoch sql.NullInt64
-	if err = i.db.QueryRowContext(ctx, getTimeLimitSQL, userID, id).Scan(&epoch); err != nil {
+	var plannedEnd sql.NullTime
+	if err = i.db.QueryRowContext(ctx, getTimeLimitSQL, userID, id).Scan(&plannedEnd); err != nil {
 		return nil, errors.Wrapf(err, "error retrieving time limit for user %s on analysis %s", userID, id)
 	}
 
 	retval := &TimeLimit{}
-	if epoch.Valid {
-		retval.TimeLimit = fmt.Sprintf("%d", epoch.Int64)
+	if epoch, ok := plannedEndEpoch(plannedEnd); ok {
+		retval.TimeLimit = fmt.Sprintf("%d", epoch)
 	} else {
 		retval.TimeLimit = "null"
 	}
@@ -265,17 +285,17 @@ func (i *Incluster) UpdateTimeLimit(ctx context.Context, user string, id constan
 		return nil, errors.Wrapf(err, "error looking user ID for %s", user)
 	}
 
-	var epoch sql.NullInt64
-	if err = i.db.QueryRowContext(ctx, updateTimeLimitSQL, userID, id, i.TimeLimitExtensionSeconds).Scan(&epoch); err != nil {
+	var plannedEnd sql.NullTime
+	if err = i.db.QueryRowContext(ctx, updateTimeLimitSQL, userID, id, i.TimeLimitExtensionSeconds).Scan(&plannedEnd); err != nil {
 		return nil, errors.Wrapf(err, "error extending time limit for user %s on analysis %s", userID, id)
 	}
 
 	retval := &TimeLimit{}
-	if epoch.Valid {
-		retval.TimeLimit = fmt.Sprintf("%d", epoch.Int64)
-	} else {
+	epoch, ok := plannedEndEpoch(plannedEnd)
+	if !ok {
 		return nil, fmt.Errorf("the time limit for analysis %s was null after extension", id)
 	}
+	retval.TimeLimit = fmt.Sprintf("%d", epoch)
 
 	return retval, nil
 }

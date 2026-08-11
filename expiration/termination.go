@@ -98,7 +98,34 @@ func (w *Worker) handleIndeterminate(ctx context.Context, analysis *db.Analysis,
 // end date and no longer present in any cluster — the DE's record of it is
 // simply out of date. No notification is sent: from the user's point of view
 // the analysis already finished.
+//
+// Publishing the status once is meant to be enough: the DE transitions the
+// analysis and it stops matching ListExpiredAnalyses. When that transition does
+// not happen the analysis stays Running and expired indefinitely, so the publish
+// is guarded — without that, every sweep on every replica publishes another
+// status update, without bound, for a condition no amount of publishing fixes.
 func (w *Worker) markCompleted(ctx context.Context, analysis *db.Analysis) {
+	published, err := w.db.HasCompletedStatus(ctx, analysis.ExternalID)
+	if err != nil {
+		// Publishing regardless would risk the unbounded loop this check exists
+		// to prevent, so leave the analysis for the next sweep.
+		log.Errorf(
+			"checking whether analysis %s was already reported Completed, skipping it this pass: %v",
+			analysis.ID, err,
+		)
+		return
+	}
+
+	if published {
+		log.Debugf(
+			"expired analysis %s is gone from every cluster and has already been reported Completed, but "+
+				"the DE still has it Running. This usually means the job-status pipeline is stalled or the "+
+				"analysis's jobs row is held by a long-running transaction; re-publishing would fix neither",
+			analysis.ID,
+		)
+		return
+	}
+
 	log.Infof(
 		"expired analysis %s (external %s) is not running in any cluster; marking it Completed",
 		analysis.ID, analysis.ExternalID,

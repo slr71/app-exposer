@@ -2,11 +2,14 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/cyverse-de/app-exposer/common"
 	"github.com/cyverse-de/app-exposer/constants"
+	"github.com/cyverse-de/messaging/v12"
 )
 
 // Analysis carries the jobs-table fields needed to decide whether an analysis
@@ -74,8 +77,8 @@ const runningStatus = "Running"
 // termination grace period, the reminder pacing, the times in the notification
 // emails — measure the interval the user actually sees.
 func (a *Analysis) localizeTimestamps() {
-	a.StartDate = inLocalZone(a.StartDate)
-	a.PlannedEndDate = inLocalZone(a.PlannedEndDate)
+	a.StartDate = InLocalZone(a.StartDate)
+	a.PlannedEndDate = InLocalZone(a.PlannedEndDate)
 }
 
 // selectAnalyses runs one of the analysisColumns queries. Every multi-row
@@ -157,6 +160,37 @@ func (d *Database) ListAnalysesExpiringWithin(ctx context.Context, window time.D
 // ignores NULLs in Postgres, so it doubles as the has-no-reminder-yet case.
 func (d *Database) ListAnalysesDueForPeriodicReminder(ctx context.Context) ([]Analysis, error) {
 	return d.selectAnalyses(ctx, periodicReminderQuery, runningStatus, time.Now())
+}
+
+// HasCompletedStatus reports whether a Completed status has already been
+// recorded for the given external ID.
+//
+// The expiration worker uses this to avoid re-publishing a Completed status it
+// has already sent. It reads job_status_updates rather than jobs.status on
+// purpose: the jobs row is updated by a separate pipeline that can lag or stall,
+// and a stall is exactly the case where the worker would otherwise re-publish on
+// every sweep forever.
+func (d *Database) HasCompletedStatus(ctx context.Context, externalID constants.ExternalID) (bool, error) {
+	tx, err := d.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+
+	status, err := d.GetLatestStatusByExternalID(ctx, tx, externalID)
+	if err != nil {
+		// No status recorded yet means nothing has been published.
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+
+	return status == messaging.SucceededState, nil
 }
 
 // interactiveAnalysis is the predicate identifying an analysis with a VICE
