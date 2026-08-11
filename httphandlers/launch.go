@@ -174,6 +174,18 @@ func (h *HTTPHandlers) launchAsync(job *model.Job) {
 		return h.incluster.BuildAnalysisBundle(ctx, job, analysisID)
 	}
 
+	// Derive the analysis's routing subdomain and planned end date before the
+	// operator is asked to launch, which is what makes this handler the canonical
+	// writer of both rather than a straggler. The expiration package's job-status
+	// consumer performs the same write as a safety net, and it cannot run until
+	// the analysis reports Running — so writing first here keeps that path to the
+	// anomaly it is meant to report. Best-effort for the same reason as
+	// SetOperatorID below: a failure is recovered by that backfill rather than
+	// failing the launch.
+	if _, err := h.db.InitializeRuntime(ctx, analysisID, job.UserID, job.InvocationID); err != nil {
+		log.Errorf("async launch %s: failed to set the subdomain and planned end date: %v", job.ID, err)
+	}
+
 	// Route to an available operator. The scheduler returns both the id (used
 	// for the DB write below) and the name (used in human-readable log lines).
 	operatorID, operatorName, err := h.scheduler.LaunchAnalysisSpec(ctx, spec, legacyBundle)
@@ -190,15 +202,6 @@ func (h *HTTPHandlers) launchAsync(job *model.Job) {
 	// onto an already-contended jobs table.
 	if err := h.apps.SetOperatorID(ctx, constants.AnalysisID(job.ID), operatorID); err != nil {
 		log.Errorf("async launch %s: failed to set operator id: %v", job.ID, err)
-	}
-
-	// Derive the analysis's routing subdomain and planned end date. The launch
-	// handler is the canonical writer of both; the expiration package's
-	// job-status consumer backfills them only for analyses that miss this
-	// write. Best-effort for the same reason as SetOperatorID above — a failure
-	// is recovered by that backfill rather than failing the launch.
-	if _, err := h.db.InitializeRuntime(ctx, analysisID, job.UserID, job.InvocationID); err != nil {
-		log.Errorf("async launch %s: failed to set the subdomain and planned end date: %v", job.ID, err)
 	}
 
 	log.Infof("async launch %s: successfully launched on operator %s (id=%s)", job.ID, operatorName, operatorID)
