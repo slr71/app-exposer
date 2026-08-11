@@ -18,13 +18,18 @@ import (
 const terminationGracePeriod = 24 * time.Hour
 
 // terminateExpired terminates the analyses that have run past their planned end
-// date, and reconciles the ones that are already gone.
-func (w *Worker) terminateExpired(ctx context.Context) {
+// date, and reconciles the ones that are already gone. It returns the analyses
+// whose owners are owed a termination notice, which the sweep sends afterwards:
+// the notification path is the slow one, and nothing about it should stand
+// between the next expired analysis and its termination.
+func (w *Worker) terminateExpired(ctx context.Context) []*db.Analysis {
 	analyses, err := w.db.ListExpiredAnalyses(ctx)
 	if err != nil {
 		log.Errorf("listing analyses past their planned end date: %v", err)
-		return
+		return nil
 	}
+
+	terminated := make([]*db.Analysis, 0, len(analyses))
 
 	for i := range analyses {
 		analysis := &analyses[i]
@@ -54,7 +59,10 @@ func (w *Worker) terminateExpired(ctx context.Context) {
 		}
 
 		w.terminate(ctx, analysis, client)
+		terminated = append(terminated, analysis)
 	}
+
+	return terminated
 }
 
 // handleIndeterminate decides what to do with an expired analysis whose
@@ -136,8 +144,9 @@ func (w *Worker) markCompleted(ctx context.Context, analysis *db.Analysis) {
 	}
 }
 
-// terminate asks the owning operator to save the analysis's outputs and exit,
-// then tells the user it was terminated.
+// terminate asks the owning operator to save the analysis's outputs and exit.
+// The user is told separately, by the sweep, once every termination has been
+// requested.
 //
 // The termination request is re-sent on every sweep until the analysis leaves
 // the cluster, and every replica sweeps, so duplicates are routine: the
@@ -158,10 +167,4 @@ func (w *Worker) terminate(ctx context.Context, analysis *db.Analysis, client *o
 			analysis.ID, client.Name(), err,
 		)
 	}
-
-	if !w.trackNotifications(ctx, analysis) {
-		return
-	}
-
-	w.deliver(ctx, analysis, db.KillWarning)
 }

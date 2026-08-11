@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/cyverse-de/app-exposer/common"
@@ -174,6 +175,58 @@ func TestListAnalysesDueForPeriodicReminderPacesFromTheLastReminder(t *testing.T
 	require.NoError(t, err)
 	assert.Empty(t, analyses)
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestListAnalysesExpiringWithinFiltersInSQL pins the two predicates that keep
+// the warning pass from doing work it cannot use. An analysis already warned
+// costs a tracking-row insert and a row lock on every sweep, on every replica;
+// one with no start date cannot have a notification rendered for it at all, so
+// returning it only spends delivery attempts.
+func TestListAnalysesExpiringWithinFiltersInSQL(t *testing.T) {
+	tests := []struct {
+		name        string
+		kind        WarningKind
+		wantPattern string
+	}{
+		{
+			name:        "the hour warning excludes analyses already warned",
+			kind:        HourWarning,
+			wantPattern: `jobs\.start_date IS NOT NULL[\s\S]*COALESCE\(notif_statuses\.hour_warning_sent, FALSE\) = FALSE`,
+		},
+		{
+			name:        "the day warning excludes analyses already warned",
+			kind:        DayWarning,
+			wantPattern: `jobs\.start_date IS NOT NULL[\s\S]*COALESCE\(notif_statuses\.day_warning_sent, FALSE\) = FALSE`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database, mock := newRegexpTestDB(t)
+
+			mock.ExpectQuery(tt.wantPattern).
+				WithArgs(runningStatus, sqlmock.AnyArg(), sqlmock.AnyArg()).
+				WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+			analyses, err := database.ListAnalysesExpiringWithin(context.Background(), tt.kind, time.Hour, 24*time.Hour)
+
+			require.NoError(t, err)
+			assert.Empty(t, analyses)
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+// TestListAnalysesExpiringWithinRejectsKindsWithNoWindow guards the map lookup:
+// the kill notification has no advance window, so asking for one is a
+// programming error rather than an empty result.
+func TestListAnalysesExpiringWithinRejectsKindsWithNoWindow(t *testing.T) {
+	database, _ := newRegexpTestDB(t)
+
+	analyses, err := database.ListAnalysesExpiringWithin(context.Background(), KillWarning, 0, time.Hour)
+
+	require.Error(t, err)
+	assert.Nil(t, analyses)
 }
 
 // TestListAnalysesMissingRuntimeExcludesBatchAnalyses pins the interactive

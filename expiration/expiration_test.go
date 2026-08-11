@@ -15,6 +15,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// expiringWindow records one ListAnalysesExpiringWithin call, so tests can
+// assert on the windows the sweep asks for as well as on what it does with the
+// answers.
+type expiringWindow struct {
+	kind db.WarningKind
+	from time.Duration
+	to   time.Duration
+}
+
 // fakeExpirationDB implements db.ExpirationDB for unit tests. It records the
 // bookkeeping the worker performs so assertions can be made against it, and
 // per-method errors can be injected to exercise the failure paths.
@@ -43,13 +52,15 @@ type fakeExpirationDB struct {
 	completedStatusErr error
 
 	// Recorded side effects.
-	ensured        []constants.AnalysisID
-	sentFlags      map[string]bool
-	failureCounts  map[string]int
-	lastPeriodic   map[constants.AnalysisID]time.Time
-	initRuntimeFor []constants.AnalysisID
-	initChanged    bool
-	commits        int
+	calls           []string
+	expiringWindows []expiringWindow
+	ensured         []constants.AnalysisID
+	sentFlags       map[string]bool
+	failureCounts   map[string]int
+	lastPeriodic    map[constants.AnalysisID]time.Time
+	initRuntimeFor  []constants.AnalysisID
+	initChanged     bool
+	commits         int
 }
 
 func newFakeDB() *fakeExpirationDB {
@@ -70,14 +81,18 @@ func flagKey(kind db.WarningKind, id constants.AnalysisID) string {
 }
 
 func (f *fakeExpirationDB) ListExpiredAnalyses(context.Context) ([]db.Analysis, error) {
+	f.calls = append(f.calls, "expired")
 	return f.expired, f.expiredErr
 }
 
-func (f *fakeExpirationDB) ListAnalysesExpiringWithin(context.Context, time.Duration) ([]db.Analysis, error) {
+func (f *fakeExpirationDB) ListAnalysesExpiringWithin(_ context.Context, kind db.WarningKind, from, to time.Duration) ([]db.Analysis, error) {
+	f.calls = append(f.calls, "expiring:"+string(kind))
+	f.expiringWindows = append(f.expiringWindows, expiringWindow{kind: kind, from: from, to: to})
 	return f.expiring, f.expiringErr
 }
 
 func (f *fakeExpirationDB) ListAnalysesDueForPeriodicReminder(context.Context) ([]db.Analysis, error) {
+	f.calls = append(f.calls, "periodic")
 	return f.periodic, f.periodicErr
 }
 
@@ -340,7 +355,7 @@ func TestWarnExpiring(t *testing.T) {
 			notifier := &fakeNotifier{err: tt.notifyErr}
 			w := newTestWorker(database, notifier)
 
-			w.warnExpiring(context.Background(), time.Hour, db.HourWarning)
+			w.warnExpiring(context.Background(), 0, time.Hour, db.HourWarning)
 
 			if tt.wantNotified {
 				assert.Equal(t, []constants.AnalysisID{id}, notifier.expiringSoon)
@@ -371,13 +386,138 @@ func TestWarnExpiringUsesTheRequestedKind(t *testing.T) {
 	notifier := &fakeNotifier{}
 	w := newTestWorker(database, notifier)
 
-	w.warnExpiring(context.Background(), DayExpiryWarning, db.DayWarning)
+	w.warnExpiring(context.Background(), DefaultExpiryWarning, DayExpiryWarning, db.DayWarning)
 
 	assert.Equal(t, []constants.AnalysisID{id}, notifier.expiringSoon,
 		"the day warning should still go out when only the hour warning was sent")
 	assert.True(t, database.sentFlags[flagKey(db.DayWarning, id)])
 	_, hourWritten := database.sentFlags[flagKey(db.HourWarning, id)]
 	assert.False(t, hourWritten, "the hour warning's flag should be left alone")
+}
+
+// TestDeliverPacesRetries covers the pacing between delivery attempts. The
+// attempt ceiling is the DE's only protection against retrying an undeliverable
+// notification forever, and the sweep runs every ten seconds — so without a
+// backoff between attempts, a notification-agent that is down for the length of
+// a rolling restart abandons every notification in flight.
+func TestDeliverPacesRetries(t *testing.T) {
+	const id = constants.AnalysisID("analysis-1")
+
+	database := newFakeDB()
+	analysis := testAnalysis(id)
+	database.statuses[id] = &db.NotifStatuses{AnalysisID: id}
+
+	notifier := &fakeNotifier{err: errors.New("notification-agent is down")}
+	w := newTestWorker(database, notifier)
+
+	// Stands in for consecutive sweeps: the interval between them is far
+	// shorter than the backoff the first failure schedules.
+	for range 5 {
+		w.deliver(context.Background(), &analysis, db.HourWarning)
+	}
+
+	assert.Len(t, notifier.expiringSoon, 1,
+		"only the first attempt should have been made; the rest fall inside the backoff")
+	assert.Equal(t, 1, database.failureCounts[flagKey(db.HourWarning, id)])
+	assert.NotContains(t, database.sentFlags, flagKey(db.HourWarning, id),
+		"a notification must not be abandoned while its retries are still pending")
+}
+
+// TestDeliverSkipsAnalysesWithNoStartDate covers a row the notification cannot
+// be rendered from at all. Counting those as delivery failures spends the
+// attempt ceiling on a condition no retry fixes, and logs a cause —
+// notification-agent being unreachable — that is not the real one.
+func TestDeliverSkipsAnalysesWithNoStartDate(t *testing.T) {
+	const id = constants.AnalysisID("analysis-1")
+
+	database := newFakeDB()
+	analysis := testAnalysis(id)
+	analysis.StartDate = nil
+	database.statuses[id] = &db.NotifStatuses{AnalysisID: id}
+
+	notifier := &fakeNotifier{}
+	newTestWorker(database, notifier).deliver(context.Background(), &analysis, db.KillWarning)
+
+	assert.Empty(t, notifier.terminated)
+	assert.Empty(t, database.failureCounts)
+	assert.Empty(t, database.sentFlags)
+}
+
+// TestNotificationPassesStopWhenTheBudgetIsSpent covers the bound on how long a
+// sweep spends notifying. Delivery holds a row lock and blocks on an HTTP POST,
+// so an unbounded notification pass delays the next sweep — and with it the next
+// round of terminations — for as long as notification-agent stays slow.
+func TestNotificationPassesStopWhenTheBudgetIsSpent(t *testing.T) {
+	const id = constants.AnalysisID("analysis-1")
+
+	spent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("expiry warnings", func(t *testing.T) {
+		database := newFakeDB()
+		database.expiring = []db.Analysis{testAnalysis(id)}
+		notifier := &fakeNotifier{}
+
+		newTestWorker(database, notifier).warnExpiring(spent, 0, time.Hour, db.HourWarning)
+
+		assert.Empty(t, notifier.expiringSoon)
+		assert.Empty(t, database.ensured, "no tracking row should be written for a pass that was cut short")
+	})
+
+	t.Run("termination notices", func(t *testing.T) {
+		database := newFakeDB()
+		analysis := testAnalysis(id)
+		notifier := &fakeNotifier{}
+
+		newTestWorker(database, notifier).notifyTerminated(spent, []*db.Analysis{&analysis})
+
+		assert.Empty(t, notifier.terminated)
+	})
+
+	t.Run("periodic reminders", func(t *testing.T) {
+		database := newFakeDB()
+		database.periodic = []db.Analysis{testAnalysis(id)}
+		notifier := &fakeNotifier{}
+
+		newTestWorker(database, notifier).remindStillRunning(spent)
+
+		assert.Empty(t, notifier.stillRunning)
+	})
+}
+
+// TestSweepTerminatesBeforeNotifying pins the order of the passes. Terminations
+// are the one pass with a deadline the DE cannot make up later — an analysis
+// past its time limit holds a node and the user's quota — so they must not queue
+// behind notification delivery.
+func TestSweepTerminatesBeforeNotifying(t *testing.T) {
+	database := newFakeDB()
+	w := newTestWorker(database, &fakeNotifier{})
+
+	w.sweep(context.Background())
+
+	assert.Equal(t,
+		[]string{"expired", "expiring:hour", "expiring:day", "periodic"},
+		database.calls,
+	)
+}
+
+// TestSweepWarnsOverDisjointWindows covers the windows the two expiry warnings
+// cover. A day window that contains the hour window sends both notifications —
+// whose text is identical — in the same pass to any analysis whose whole time
+// limit is shorter than a day.
+func TestSweepWarnsOverDisjointWindows(t *testing.T) {
+	database := newFakeDB()
+	w := New(database, &fakeNotifier{}, nil, nil, Init{})
+
+	w.sweep(context.Background())
+
+	assert.Equal(t,
+		[]expiringWindow{
+			{kind: db.HourWarning, from: 0, to: DefaultExpiryWarning},
+			{kind: db.DayWarning, from: DefaultExpiryWarning, to: DayExpiryWarning},
+		},
+		database.expiringWindows,
+	)
 }
 
 func TestReminderDue(t *testing.T) {

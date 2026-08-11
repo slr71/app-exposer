@@ -95,7 +95,8 @@ func (h *HTTPHandlers) GetScheduler() *operatorclient.Scheduler {
 // database outage) and the caller should surface that to the client rather
 // than treat the analysis as missing. Callers requiring a live client must
 // treat nil-client-with-nil-error as "not found". Callers answering an
-// "exists?" question may use nil-with-nil-error as "no".
+// "exists?" question may use nil-with-nil-error as "no". An empty scheduler
+// is a miss rather than an error: there is nowhere for the analysis to be.
 func (h *HTTPHandlers) operatorClientForAnalysis(ctx context.Context, analysisID constants.AnalysisID) (*operatorclient.Client, error) {
 	// Fast path: check the DB for a recorded operator id. GetOperatorID
 	// normalizes sql.ErrNoRows to (uuid.Nil, nil); a non-nil error here
@@ -121,6 +122,16 @@ func (h *HTTPHandlers) operatorClientForAnalysis(ctx context.Context, analysisID
 	// Search path: ask every operator in parallel whether it has this analysis.
 	client, searchErr := h.searchOperatorsForAnalysis(ctx, analysisID)
 	if client == nil {
+		if errors.Is(searchErr, operatorclient.ErrNoOperators) {
+			// There is nowhere for the analysis to be running, which answers
+			// the question rather than failing it. Callers turn a non-nil error
+			// into a 503, and the scheduler is legitimately empty for as long
+			// as it takes the reconciler to sync the operators table after a
+			// restart — a 503 there would tell the apps service to retry a
+			// save-and-exit for an analysis that is genuinely gone.
+			log.Warnf("no operators are registered, so analysis %s is not running anywhere", analysisID)
+			return nil, nil
+		}
 		if searchErr != nil {
 			// Some operators errored AND none reported found. We can't
 			// tell whether the analysis is genuinely missing or hiding

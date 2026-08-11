@@ -107,12 +107,6 @@ const (
 		   AND jobs.planned_end_date <= $2::timestamp
 	`
 
-	expiringWithinQuery = analysisColumns + `
-		 WHERE jobs.status = $1
-		   AND jobs.planned_end_date > $2::timestamp
-		   AND jobs.planned_end_date <= $3::timestamp
-	`
-
 	periodicReminderQuery = analysisColumns + `
 		  LEFT JOIN notif_statuses ON jobs.id = notif_statuses.analysis_id
 		 WHERE jobs.status = $1
@@ -134,18 +128,55 @@ const (
 	`
 )
 
+// expiringWithinQueryFor builds the expiry-warning query for one warning kind.
+// sentColumn comes from expiringWithinQueries below, so the column name is
+// always one of a closed set of constants and is never interpolated from input.
+//
+// The query does the filtering the worker would otherwise do in Go: analyses
+// already warned are excluded here, because one returned to the worker costs a
+// tracking-row insert and a row lock on every sweep, on every replica, and
+// records nothing that would stop it happening again ten seconds later. Analyses
+// with no start date are excluded for a different reason — a notification cannot
+// be rendered without one, so returning them only burns delivery attempts.
+func expiringWithinQueryFor(sentColumn string) string {
+	return analysisColumns + `
+		  LEFT JOIN notif_statuses ON jobs.id = notif_statuses.analysis_id
+		 WHERE jobs.status = $1
+		   AND jobs.start_date IS NOT NULL
+		   AND jobs.planned_end_date > $2::timestamp
+		   AND jobs.planned_end_date <= $3::timestamp
+		   AND COALESCE(notif_statuses.` + sentColumn + `, FALSE) = FALSE
+	`
+}
+
+// expiringWithinQueries holds the expiry-warning query for each warning kind
+// that has an advance window.
+var expiringWithinQueries = map[WarningKind]string{
+	DayWarning:  expiringWithinQueryFor("day_warning_sent"),
+	HourWarning: expiringWithinQueryFor("hour_warning_sent"),
+}
+
 // ListExpiredAnalyses returns the running analyses whose planned end date has
 // passed and which are therefore due for termination.
 func (d *Database) ListExpiredAnalyses(ctx context.Context) ([]Analysis, error) {
 	return d.selectAnalyses(ctx, expiredAnalysesQuery, runningStatus, time.Now())
 }
 
-// ListAnalysesExpiringWithin returns the running analyses whose planned end
-// date falls between now and the given window — the candidates for an advance
-// "your analysis will terminate" warning.
-func (d *Database) ListAnalysesExpiringWithin(ctx context.Context, window time.Duration) ([]Analysis, error) {
+// ListAnalysesExpiringWithin returns the running analyses due the given expiry
+// warning: those whose planned end date falls between now+from and now+to and
+// which have not been warned yet.
+//
+// The window is half-open at the near end so the day and hour warnings cover
+// disjoint ranges. Nesting them would send both notifications, whose text is
+// identical, in the same pass to any analysis whose whole time limit is shorter
+// than the day window.
+func (d *Database) ListAnalysesExpiringWithin(ctx context.Context, kind WarningKind, from, to time.Duration) ([]Analysis, error) {
+	query, ok := expiringWithinQueries[kind]
+	if !ok {
+		return nil, fmt.Errorf("no expiry warning query for warning kind %q", kind)
+	}
 	now := time.Now()
-	return d.selectAnalyses(ctx, expiringWithinQuery, runningStatus, now, now.Add(window))
+	return d.selectAnalyses(ctx, query, runningStatus, now.Add(from), now.Add(to))
 }
 
 // ListAnalysesDueForPeriodicReminder returns the running analyses that have not

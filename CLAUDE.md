@@ -81,8 +81,16 @@ Loaded via **koanf**, not a typed struct. Sources in order: file (`/etc/de/app-e
 - Template with all keys: `configs/default.yml`
 - Access pattern: `cfg.String("k8s.frontend.base")`, `cfg.Bool(...)`, etc. There is no compile-time check that a key exists, so typos are runtime errors.
 - The expiration worker adds `amqp.*`, `iplant_groups.*`, and
-  `notification_agent.base`. `iplant_groups.user` is required (startup fails
-  without it); an empty `amqp.uri` disables only the runtime backfill.
+  `notification_agent.base`. None of them can stop the worker: a missing
+  `iplant_groups.user` costs notifications their email address, an unusable
+  `iplant_groups.base` or `notification_agent.base` swaps in
+  `notifications.Disabled`, and an empty `amqp.uri` disables the runtime
+  backfill. Time-limit enforcement keeps running in every case — each of these
+  logs at error level instead.
+- `TZ` is load-bearing, not cosmetic: it decides the zone the DE's naive
+  analysis timestamps are read in. Unset, Go resolves it to UTC and every
+  analysis on a US deployment expires hours early. The worker logs the zone it
+  resolved at startup (`db.LocalZone`).
 - Kubeconfig: `~/.kube/config` by default; setting the `CLUSTER` env var switches to in-cluster config.
 - Important namespace flags: `--namespace` (default `default`, used for outcluster resources) and `--vice-namespace` (default `vice-apps`, where VICE pods run).
 - Local-dev TLS certs and a sample service listing live in `local-config/`.
@@ -135,6 +143,22 @@ Every package does `var log = common.Log`. Caller reporting is on. Level is set 
 - **The expiration worker runs in every replica.** Anything that must happen once
   per analysis takes the `notif_statuses` row with `FOR UPDATE SKIP LOCKED`
   (`db.ClaimNotifStatuses`) rather than read-then-write.
+- **The sweep terminates first and notifies second, under a budget.** Delivery
+  blocks on an HTTP POST while holding a row lock, so notifications are capped at
+  `DefaultNotificationBudget` per sweep and never sit between an expired analysis
+  and its termination. Retries are paced by `expiration/retry.go`:
+  `MaxNotificationAttempts` counts spaced attempts, so it measures hours rather
+  than the sweep interval. Anything that shortens the pacing has to shrink the
+  ceiling with it.
+- **The expiry warning windows are disjoint** (`(0, 1h]` and `(1h, 24h]`) and the
+  already-warned filter lives in SQL. Nesting them sends both warnings — the text
+  is identical — to any analysis whose time limit is under a day; dropping the
+  filter re-locks every warned analysis's row on every sweep, on every replica.
+- **vice-operator runs one replica per cluster.** Its save-and-exit dedup
+  (`saveAndExitInFlight`) is per-process, and duplicate requests arrive over the
+  operator's Service, so scaling it out needs a cluster-wide claim first — two
+  replicas would delete an analysis's resources while the other is still
+  uploading its outputs.
 - **Two Swagger doc trees**: `docs/` for app-exposer, `operatordocs/` for vice-operator (instance name `operator`); regenerate with `just docs` / `just operator-docs`.
 - **`outcluster/` is legacy HTCondor support** — avoid modernizing it unless the task asks.
 - **Files over ~300 lines** should be split by entity/feature (`launch.go`, `exit.go`, …) — follow the existing pattern in `httphandlers/`.

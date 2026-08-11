@@ -1,6 +1,9 @@
 package db
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // The DE stores analysis timestamps — jobs.start_date, jobs.planned_end_date,
 // notif_statuses.last_periodic_warning — in `timestamp without time zone`
@@ -28,6 +31,21 @@ import "time"
 // a second implementation of it would drift.
 func InLocalZone(t *time.Time) *time.Time {
 	return inZone(t, time.Local)
+}
+
+// LocalZone describes the zone InLocalZone relabels into: its abbreviation, its
+// current offset from UTC, and whether the process was told which zone to use.
+//
+// Go falls back to UTC when TZ is unset or names a zone the image cannot
+// resolve, and that fallback is silent. On a deployment whose analyses were
+// written in a western zone it makes every planned end date look hours earlier
+// than it is, which terminates live analyses — the failure this whole file
+// exists to prevent. Callers log it at startup so the resolved zone is visible
+// before it matters.
+func LocalZone() (name string, offset time.Duration, configured bool) {
+	zone, seconds := time.Now().Zone()
+	_, configured = os.LookupEnv("TZ")
+	return zone, time.Duration(seconds) * time.Second, configured
 }
 
 // inZone relabels a naive timestamp's wall-clock fields as being in loc, without

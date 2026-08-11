@@ -71,7 +71,8 @@ func TestNaiveTimestampsAreNeverComparedAgainstNow(t *testing.T) {
 		query string
 	}{
 		{name: "expired", query: expiredAnalysesQuery},
-		{name: "expiring within a window", query: expiringWithinQuery},
+		{name: "expiring within the day window", query: expiringWithinQueries[DayWarning]},
+		{name: "expiring within the hour window", query: expiringWithinQueries[HourWarning]},
 		{name: "due for a periodic reminder", query: periodicReminderQuery},
 		{name: "initial runtime write", query: initialRuntimeStmt},
 		{name: "last periodic warning write", query: lastPeriodicWarningStmt},

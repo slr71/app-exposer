@@ -76,7 +76,13 @@ type Operator struct {
 	// resources, so a second concurrent run would tear the Deployment down
 	// while the first is still streaming files to iRODS. Duplicate requests are
 	// routine: the expiration worker re-sends one on every sweep, from every
-	// replica, until the analysis leaves the cluster.
+	// app-exposer replica, until the analysis leaves the cluster.
+	//
+	// The guard is per process, and the duplicates arrive over HTTP through the
+	// operator's Service, so it only holds while vice-operator runs a single
+	// replica per cluster — which is what the DE deploys. Scaling it out needs a
+	// cluster-wide claim (a Lease, or a marker on the analysis's Deployment)
+	// first; without one, two replicas would race exactly as described above.
 	saveAndExitInFlight sync.Map
 
 	// Construction config for the operator-side VICESpec build path. These are

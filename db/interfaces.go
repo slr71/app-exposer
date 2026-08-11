@@ -17,9 +17,10 @@ type ExpirationDB interface {
 	// ListExpiredAnalyses returns running analyses past their planned end date.
 	ListExpiredAnalyses(ctx context.Context) ([]Analysis, error)
 
-	// ListAnalysesExpiringWithin returns running analyses whose planned end
-	// date falls inside the given window.
-	ListAnalysesExpiringWithin(ctx context.Context, window time.Duration) ([]Analysis, error)
+	// ListAnalysesExpiringWithin returns the running analyses due the given
+	// expiry warning: those expiring between now+from and now+to that have not
+	// been warned yet.
+	ListAnalysesExpiringWithin(ctx context.Context, kind WarningKind, from, to time.Duration) ([]Analysis, error)
 
 	// ListAnalysesDueForPeriodicReminder returns running analyses whose last
 	// periodic reminder is older than their configured reminder period.

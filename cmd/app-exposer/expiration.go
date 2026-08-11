@@ -41,37 +41,9 @@ func startExpirationWorker(
 	jobStatusURL string,
 	sweepInterval, expiryWarning time.Duration,
 ) {
-	groupsBase := c.String("iplant_groups.base")
-	if groupsBase == "" {
-		groupsBase = "http://iplant-groups"
-	}
-
-	groupsUser := c.String("iplant_groups.user")
-	if groupsUser == "" {
-		log.Warn("iplant_groups.user is not set in the config file; iplant-groups rejects subject lookups without it, " +
-			"so analysis notifications will reach the DE UI but carry no email address")
-	}
-
-	subjects, err := iplantgroups.New(groupsBase, groupsUser)
-	if err != nil {
-		log.Errorf("building the iplant-groups client, so analysis time limits will not be enforced: %v", err)
-		return
-	}
-
-	notificationAgentBase := c.String("notification_agent.base")
-	if notificationAgentBase == "" {
-		notificationAgentBase = "http://notification-agent"
-	}
-
-	notifier, err := notifications.New(notificationAgentBase, c.String("k8s.frontend.base"), subjects)
-	if err != nil {
-		log.Errorf("building the notification client, so analysis time limits will not be enforced: %v", err)
-		return
-	}
-
 	worker := expiration.New(
 		dbase,
-		notifier,
+		buildNotifier(c),
 		scheduler,
 		incluster.NewJSLPublisher(jobStatusURL),
 		expiration.Init{
@@ -82,6 +54,46 @@ func startExpirationWorker(
 	go worker.Run(ctx)
 
 	startRuntimeBackfill(ctx, c, dbase)
+}
+
+// buildNotifier builds the client the expiration worker notifies users through,
+// falling back to a notifier that drops what it is given when the deployment's
+// notification settings cannot produce a working one.
+//
+// Notifications are the part of this worker the DE can do without; terminating
+// analyses at their time limit is not. Returning no worker at all over a
+// malformed URL would leave every VICE analysis running past its limit, so the
+// failure is confined to what actually depends on the setting.
+func buildNotifier(c *koanf.Koanf) notifications.AnalysisNotifier {
+	groupsBase := c.String("iplant_groups.base")
+	if groupsBase == "" {
+		groupsBase = "http://iplant-groups"
+	}
+
+	groupsUser := c.String("iplant_groups.user")
+	if groupsUser == "" {
+		log.Error("iplant_groups.user is not set in the config file; iplant-groups rejects subject lookups without it, " +
+			"so analysis notifications will reach the DE UI but carry no email address")
+	}
+
+	subjects, err := iplantgroups.New(groupsBase, groupsUser)
+	if err != nil {
+		log.Errorf("building the iplant-groups client, so analysis notifications are disabled: %v", err)
+		return notifications.Disabled{}
+	}
+
+	notificationAgentBase := c.String("notification_agent.base")
+	if notificationAgentBase == "" {
+		notificationAgentBase = "http://notification-agent"
+	}
+
+	notifier, err := notifications.New(notificationAgentBase, c.String("k8s.frontend.base"), subjects)
+	if err != nil {
+		log.Errorf("building the notification client, so analysis notifications are disabled: %v", err)
+		return notifications.Disabled{}
+	}
+
+	return notifier
 }
 
 // startRuntimeBackfill subscribes to the DE's job status updates so that any

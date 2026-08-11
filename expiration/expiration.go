@@ -11,7 +11,6 @@ package expiration
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/cyverse-de/app-exposer/common"
@@ -19,7 +18,6 @@ import (
 	"github.com/cyverse-de/app-exposer/incluster"
 	"github.com/cyverse-de/app-exposer/notifications"
 	"github.com/cyverse-de/app-exposer/operatorclient"
-	"github.com/jmoiron/sqlx"
 	"github.com/sirupsen/logrus"
 )
 
@@ -46,9 +44,22 @@ const (
 
 	// MaxNotificationAttempts bounds how many times delivery of a single
 	// notification is retried before the DE gives up and stops trying. Without
-	// it a persistently unreachable recipient would be retried on every sweep
-	// for the life of the analysis.
-	MaxNotificationAttempts = 3
+	// it a persistently unreachable recipient would be retried for the life of
+	// the analysis.
+	//
+	// Attempts are spaced by an exponential backoff (see retry.go), so the
+	// ceiling is reached after a couple of hours of failures rather than after a
+	// couple of sweeps. Both numbers have to be read together: raising the
+	// ceiling without the pacing is what let a brief restart of
+	// notification-agent abandon every notification in flight.
+	MaxNotificationAttempts = 10
+
+	// DefaultNotificationBudget bounds how long one sweep may spend sending
+	// notifications. Terminations run first and notifications second, so the
+	// budget is what keeps a notification-agent that hangs rather than refuses
+	// from pushing the next sweep — and with it the next round of terminations —
+	// arbitrarily far out.
+	DefaultNotificationBudget = 2 * time.Minute
 )
 
 // completedMessage is recorded against an analysis that the DE marks Completed
@@ -65,16 +76,23 @@ type Init struct {
 	// ExpiryWarning is how far ahead of expiry to send the short-notice
 	// warning. Zero selects DefaultExpiryWarning.
 	ExpiryWarning time.Duration
+
+	// NotificationBudget is how long one sweep may spend on notifications
+	// before deferring the rest to the next sweep. Zero selects
+	// DefaultNotificationBudget.
+	NotificationBudget time.Duration
 }
 
 // Worker runs the periodic expiration sweep.
 type Worker struct {
-	db            db.ExpirationDB
-	notifier      notifications.AnalysisNotifier
-	scheduler     *operatorclient.Scheduler
-	status        incluster.AnalysisStatusPublisher
-	sweepInterval time.Duration
-	expiryWarning time.Duration
+	db                 db.ExpirationDB
+	notifier           notifications.AnalysisNotifier
+	scheduler          *operatorclient.Scheduler
+	status             incluster.AnalysisStatusPublisher
+	sweepInterval      time.Duration
+	expiryWarning      time.Duration
+	notificationBudget time.Duration
+	retries            *retryTracker
 }
 
 // New creates a Worker. The scheduler is used both to find which cluster is
@@ -89,18 +107,23 @@ func New(
 	init Init,
 ) *Worker {
 	w := &Worker{
-		db:            database,
-		notifier:      notifier,
-		scheduler:     scheduler,
-		status:        status,
-		sweepInterval: init.SweepInterval,
-		expiryWarning: init.ExpiryWarning,
+		db:                 database,
+		notifier:           notifier,
+		scheduler:          scheduler,
+		status:             status,
+		sweepInterval:      init.SweepInterval,
+		expiryWarning:      init.ExpiryWarning,
+		notificationBudget: init.NotificationBudget,
+		retries:            newRetryTracker(),
 	}
 	if w.sweepInterval <= 0 {
 		w.sweepInterval = DefaultSweepInterval
 	}
 	if w.expiryWarning <= 0 {
 		w.expiryWarning = DefaultExpiryWarning
+	}
+	if w.notificationBudget <= 0 {
+		w.notificationBudget = DefaultNotificationBudget
 	}
 	return w
 }
@@ -112,6 +135,7 @@ func (w *Worker) Run(ctx context.Context) {
 		"starting analysis expiration worker (sweep every %s, expiry warning %s ahead)",
 		w.sweepInterval, w.expiryWarning,
 	)
+	logLocalZone()
 
 	ticker := time.NewTicker(w.sweepInterval)
 	defer ticker.Stop()
@@ -129,9 +153,31 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
+// logLocalZone reports the zone the DE's naive analysis timestamps are read and
+// written in. It is resolved from the process environment rather than from
+// configuration, so this is the only place the deployment gets to see what it
+// actually resolved to before an analysis is terminated on the strength of it.
+func logLocalZone() {
+	name, offset, configured := db.LocalZone()
+	log.Infof("analysis timestamps are interpreted as wall-clock time in %s (UTC%+.0fh)", name, offset.Hours())
+	if !configured {
+		log.Warnf(
+			"TZ is not set, so analysis timestamps are being interpreted in %s. If the DE writes them in "+
+				"another zone, every analysis expires early by the difference; set TZ to the deployment's zone",
+			name,
+		)
+	}
+}
+
 // sweep runs one pass of all four responsibilities. Each pass is guarded
 // against panics: this worker is secondary to app-exposer's API, and a panic
 // here would otherwise take the VICE launch path down with it.
+//
+// Terminations run before notifications, under their own unbounded context,
+// because they are the pass with a deadline the DE cannot make up later: an
+// analysis left running past its time limit holds a node and the user's quota.
+// The notification passes share one budget, so a notification-agent that hangs
+// delays warnings rather than terminations.
 func (w *Worker) sweep(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -140,10 +186,17 @@ func (w *Worker) sweep(ctx context.Context) {
 	}()
 
 	w.repairRuntime(ctx)
-	w.warnExpiring(ctx, w.expiryWarning, db.HourWarning)
-	w.warnExpiring(ctx, DayExpiryWarning, db.DayWarning)
-	w.remindStillRunning(ctx)
-	w.terminateExpired(ctx)
+	terminated := w.terminateExpired(ctx)
+
+	notifyCtx, cancel := context.WithTimeout(ctx, w.notificationBudget)
+	defer cancel()
+
+	w.notifyTerminated(notifyCtx, terminated)
+	w.warnExpiring(notifyCtx, 0, w.expiryWarning, db.HourWarning)
+	w.warnExpiring(notifyCtx, w.expiryWarning, DayExpiryWarning, db.DayWarning)
+	w.remindStillRunning(notifyCtx)
+
+	w.retries.prune(time.Now())
 }
 
 // repairRuntime fills in the subdomain and planned end date of any running VICE
@@ -171,164 +224,5 @@ func (w *Worker) repairRuntime(ctx context.Context) {
 		initializeRuntime(ctx, w.db, analysis, analysis.ExternalID, log.WithFields(logrus.Fields{
 			"analysisID": analysis.ID,
 		}))
-	}
-}
-
-// warnExpiring warns the owners of analyses expiring inside the given window.
-func (w *Worker) warnExpiring(ctx context.Context, window time.Duration, kind db.WarningKind) {
-	analyses, err := w.db.ListAnalysesExpiringWithin(ctx, window)
-	if err != nil {
-		log.Errorf("listing analyses expiring within %s: %v", window, err)
-		return
-	}
-
-	for i := range analyses {
-		analysis := &analyses[i]
-		if !w.trackNotifications(ctx, analysis) {
-			continue
-		}
-		w.deliver(ctx, analysis, kind)
-	}
-}
-
-// remindStillRunning sends the periodic "your analysis is still running"
-// reminder to the owners of analyses whose reminder period has elapsed.
-func (w *Worker) remindStillRunning(ctx context.Context) {
-	analyses, err := w.db.ListAnalysesDueForPeriodicReminder(ctx)
-	if err != nil {
-		log.Errorf("listing analyses due for a periodic reminder: %v", err)
-		return
-	}
-
-	for i := range analyses {
-		analysis := &analyses[i]
-		if !w.trackNotifications(ctx, analysis) {
-			continue
-		}
-
-		claimErr := w.db.ClaimNotifStatuses(ctx, analysis.ID, func(tx *sqlx.Tx, statuses *db.NotifStatuses) error {
-			if !reminderDue(analysis, statuses, time.Now()) {
-				return nil
-			}
-			if err := w.notifier.NotifyStillRunning(ctx, analysis); err != nil {
-				// Roll back rather than record a send that didn't happen;
-				// the next sweep retries. Unlike the expiry warnings there
-				// is no attempt ceiling here, because a missed reminder is
-				// harmless and the reminder period paces the retries.
-				return err
-			}
-			return w.db.SetLastPeriodicWarning(ctx, tx, analysis.ID)
-		})
-		w.logClaimResult(analysis, "periodic reminder", claimErr)
-	}
-}
-
-// reminderDue reports whether an analysis's periodic reminder is due. The
-// reminder is paced from the later of the analysis's start and its last
-// reminder, so a freshly started analysis waits a full period before its first
-// one rather than being reminded immediately.
-func reminderDue(analysis *db.Analysis, statuses *db.NotifStatuses, now time.Time) bool {
-	if analysis.StartDate == nil {
-		return false
-	}
-
-	period := DefaultPeriodicReminderPeriod
-	if statuses.PeriodicWarningSeconds > 0 {
-		period = time.Duration(statuses.PeriodicWarningSeconds) * time.Second
-	}
-
-	since := *analysis.StartDate
-	if statuses.LastPeriodicWarning != nil && statuses.LastPeriodicWarning.After(since) {
-		since = *statuses.LastPeriodicWarning
-	}
-
-	return since.Add(period).Before(now)
-}
-
-// deliver sends one of the expiry notifications for an analysis, exactly once
-// across all replicas, and records the outcome.
-//
-// Delivery failures are counted rather than retried immediately; after
-// MaxNotificationAttempts the notification is marked sent so the DE stops
-// trying. The counter is committed even on failure, which is why fn returns nil
-// on the failure path.
-func (w *Worker) deliver(ctx context.Context, analysis *db.Analysis, kind db.WarningKind) {
-	claimErr := w.db.ClaimNotifStatuses(ctx, analysis.ID, func(tx *sqlx.Tx, statuses *db.NotifStatuses) error {
-		if statuses.Sent(kind) {
-			return nil
-		}
-
-		sendErr := w.notify(ctx, analysis, kind)
-		if sendErr == nil {
-			return w.db.SetWarningSent(ctx, tx, kind, analysis.ID, true)
-		}
-
-		failures := statuses.FailureCount(kind) + 1
-		log.Errorf(
-			"delivering %s notification for analysis %s failed (attempt %d of %d); "+
-				"this usually means notification-agent or iplant-groups is unreachable: %v",
-			kind, analysis.ID, failures, MaxNotificationAttempts, sendErr,
-		)
-
-		if err := w.db.SetWarningFailureCount(ctx, tx, kind, analysis.ID, failures); err != nil {
-			return err
-		}
-
-		if failures >= MaxNotificationAttempts {
-			log.Warnf(
-				"giving up on the %s notification for analysis %s after %d failed attempts",
-				kind, analysis.ID, failures,
-			)
-			return w.db.SetWarningSent(ctx, tx, kind, analysis.ID, true)
-		}
-
-		return nil
-	})
-	w.logClaimResult(analysis, string(kind)+" notification", claimErr)
-}
-
-// notify dispatches to the notification matching the warning kind.
-func (w *Worker) notify(ctx context.Context, analysis *db.Analysis, kind db.WarningKind) error {
-	switch kind {
-	case db.KillWarning:
-		return w.notifier.NotifyTerminated(ctx, analysis)
-	case db.DayWarning, db.HourWarning:
-		return w.notifier.NotifyExpiringSoon(ctx, analysis)
-	}
-	return errors.New("unknown warning kind " + string(kind))
-}
-
-// trackNotifications makes sure the analysis has a notification-tracking row,
-// reporting whether it is safe to go on and notify. Analyses with no external
-// ID yet are skipped: they have no job_steps row, so nothing can be tracked or
-// terminated for them.
-func (w *Worker) trackNotifications(ctx context.Context, analysis *db.Analysis) bool {
-	if analysis.ExternalID == "" {
-		log.Warnf(
-			"analysis %s has no external ID; skipping it this pass. "+
-				"This usually means its job_steps row hasn't been written yet",
-			analysis.ID,
-		)
-		return false
-	}
-
-	if err := w.db.EnsureNotifStatuses(ctx, analysis.ID, analysis.ExternalID, analysis.PeriodicPeriod); err != nil {
-		log.Errorf("creating the notification-tracking row for analysis %s: %v", analysis.ID, err)
-		return false
-	}
-
-	return true
-}
-
-// logClaimResult reports the outcome of a claimed notification attempt. Losing
-// the claim is the expected outcome on every replica but one, so it is logged
-// at debug level.
-func (w *Worker) logClaimResult(analysis *db.Analysis, what string, err error) {
-	switch {
-	case err == nil:
-	case errors.Is(err, db.ErrNotClaimed):
-		log.Debugf("another replica is handling the %s for analysis %s", what, analysis.ID)
-	default:
-		log.Errorf("handling the %s for analysis %s: %v", what, analysis.ID, err)
 	}
 }
